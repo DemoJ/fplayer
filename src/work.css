@@ -1,0 +1,90 @@
+.work-detail {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(240px, 30vw) 1fr;
+  grid-template-rows: auto 1fr;
+  align-items: start;
+  column-gap: 6vw;
+  row-gap: 24px;
+  padding-top: 36px !important;
+  position: relative;
+}
+.work-detail section h1 { font: 900 clamp(2.8rem, 5vw, 6rem)/1 "Noto Serif SC"; margin: 14px 0 20px; }
+.work-detail-top { grid-column: 1 / -1; display: flex; align-items: center; min-height: 24px; }
+.work-actions { display: flex; align-items: center; gap: 12px; margin: 18px 0; }
+.work-actions small { color: #8a8a86; }
+.work-card { position: relative; min-width: 0; }
+.media-card { position: relative; min-width: 0; }
+.media-more { position: absolute; right: 8px; top: 8px; z-index: 3; width: 30px; height: 30px; border: 1px solid #ffffff40; border-radius: 50%; background: #090b0dcc; color: #fff; font-size: 1.2rem; line-height: 1; cursor: pointer; backdrop-filter: blur(8px); }
+.media-more:hover { border-color: var(--orange); color: var(--orange); }
+.media-menu { position: absolute; z-index: 4; top: 44px; right: 8px; min-width: 130px; padding: 5px; border: 1px solid #363a3d; background: #171a1d; box-shadow: 0 12px 30px #000b; }
+.media-menu button { display: block; width: 100%; border: 0; background: transparent; color: #ddd; padding: 9px 10px; text-align: left; font-size: .75rem; cursor: pointer; }
+.media-menu button:hover { background: #252a2d; color: #fff; }
+.media-menu .danger-text { color: #df8878; }
+.media-edit-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.work-files-list { display: grid; gap: 8px; margin-top: 18px; }
+.work-file-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; border: 1px solid #292c2e; background: #0d1012; padding: 12px; }
+.work-file-row > div:first-child { min-width: 0; }
+.work-file-row strong, .work-file-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-file-row strong { color: #eee; font-size: .8rem; }
+.work-file-row small { color: #777; font-size: .68rem; max-width: 230px; margin-top: 4px; }
+.work-file-row > div:last-child { display: flex; gap: 6px; flex-shrink: 0; }
+.episodes { margin-top: 35px; max-height: 55vh; overflow: auto; padding-right: 8px; }
+.episodes h3 { color: var(--orange); font-size: .8rem; letter-spacing: .12em; margin: 25px 0 8px; }
+.episode { display: grid; grid-template-columns: 80px 1fr auto; align-items: center; gap: 12px; border-top: 1px solid #292c2e; padding: 13px 4px; }
+.episode span { color: var(--orange); font-size: .75rem; }
+.episode b { font-size: .78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.episode small { color: #666; }
+.episode:hover { background: #15181a; }
+.metadata-panel {
+  margin: 0 5vw 28px;
+  padding: 22px 24px;
+  border: 1px solid #292c2e;
+  background: #121518;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px 20px;
+  align-items: center;
+}
+.metadata-panel h2 { margin: 6px 0; font: 700 1.2rem "Noto Serif SC"; }
+.metadata-panel p, .metadata-panel small { margin: 0; color: #777; font-size: .78rem; line-height: 1.5; }
+.metadata-panel small { grid-column: 1 / -1; color: #c7b09b; }
+.metadata-actions { display: flex; gap: 8px; }
+.metadata-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.topbar-tools { display: flex; align-items: end; gap: 18px; flex-wrap: wrap; justify-content: flex-end; }
+.view-switch { display: flex; border: 1px solid #33373a; overflow: hidden; }
+.view-switch a { padding: 10px 14px; color: #777; font-size: .78rem; background: #101315; }
+.view-switch a.active, .view-switch a:hover { color: #fff; background: #1a1e21; }
+.view-switch a.active { color: var(--orange); }
+.crumbs { display: flex; flex-wrap: wrap; gap: 8px; margin: -20px 0 28px; }
+.crumbs button { border: 1px solid #33373a; background: #121518; color: #aaa; padding: 8px 12px; cursor: pointer; font-size: .75rem; }
+.crumbs button:hover { border-color: var(--orange); color: #fff; }
+.folder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.folder-card { display: flex; gap: 14px; align-items: center; text-align: left; border: 1px solid #292c2e; background: #121518; padding: 18px; cursor: pointer; color: inherit; }
+.folder-card:hover { border-color: var(--orange); }
+.folder-icon { width: 48px; height: 48px; display: grid; place-items: center; background: #262a2d; color: var(--orange); font-weight: 700; flex-shrink: 0; }
+.folder-card h3 { margin: 0 0 4px; font-size: 1rem; }
+.folder-card p, .folder-card small { margin: 0; color: #777; font-size: .75rem; }
+.folder-card small { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.folder-list { display: grid; border-top: 1px solid #292c2e; }
+.folder-row { display: grid; grid-template-columns: 48px 1fr auto; gap: 12px; align-items: center; border: 0; border-bottom: 1px solid #292c2e; background: transparent; color: inherit; text-align: left; padding: 14px 8px; cursor: pointer; width: 100%; }
+.folder-row:hover { background: #15181a; }
+.folder-badge { font-size: .65rem; letter-spacing: .12em; color: var(--orange); font-weight: 700; }
+.folder-row b { font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-row small { color: #666; font-size: .72rem; white-space: nowrap; }
+.folder-card { display: flex; text-decoration: none; }
+.empty.muted { color: #666; font-size: .85rem; padding: 18px 0; }
+.back-inline { color: #888; font-size: .85rem; align-self: end; margin-bottom: 8px; }
+.back-inline:hover { color: var(--orange); }
+@media (max-width: 800px) {
+  .work-detail { grid-template-columns: 1fr; padding-top: 24px !important; }
+  .work-detail .detail-art { width: min(70vw, 300px); margin: auto; }
+  .episode { grid-template-columns: 70px 1fr; }
+  .episode small { display: none; }
+  .metadata-panel { margin: 0 20px 20px; grid-template-columns: 1fr; }
+  .topbar-tools { justify-content: stretch; }
+  .view-switch { width: 100%; }
+  .view-switch a { flex: 1; text-align: center; }
+  .folder-row { grid-template-columns: 40px 1fr; }
+  .folder-row small { grid-column: 2; white-space: normal; }
+}

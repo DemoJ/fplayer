@@ -1,0 +1,21 @@
+services:
+  fplayer:
+    build: .
+    container_name: fplayer
+    ports:
+      - "3000:3000"
+    environment:
+      APP_SECRET: c699a24b5bd628fb002cd2e1bc74bd1fae771f2bd5257c20e344ecfe6c9a3f5a
+      DATA_DIR: /data
+      SECURE_COOKIES: "false"
+    volumes:
+      - ./data:/data
+      # 需要读取 NAS 本地媒体目录时，取消注释并把左侧改成实际路径
+      # - /volume1/video:/media:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/setup').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped

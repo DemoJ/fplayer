@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" role="img" aria-label="FPlayer">
+  <defs>
+    <linearGradient id="g" x1="30" y1="24" x2="150" y2="156" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff8a52"/>
+      <stop offset="1" stop-color="#ef6a3a"/>
+    </linearGradient>
+  </defs>
+  <rect width="180" height="180" rx="40" fill="#0b0d10"/>
+  <rect x="18" y="18" width="144" height="144" rx="30" fill="url(#g)"/>
+  <path d="M60 48h64v20H85v12h34v20H85v32H60V48z" fill="#101214"/>
+</svg>
