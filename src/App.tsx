@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, clearToken, getToken, setToken, type BrowseResult, type Media, type ScanJob, type Source, type User, type Work } from "./api";
@@ -232,7 +232,52 @@ function WorkDetail() {
   return <main className="work-detail"><div className="work-detail-top"><LibraryBack kind={data.work.kind} /></div><div className="detail-art" style={data.work.poster_path ? { backgroundImage: `url(${posterUrl(data.work.poster_path)})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}><b>{data.work.poster_path ? "" : data.work.title.slice(0, 1)}</b></div><section><span className="eyebrow">{data.work.kind === "show" ? "剧集" : "电影"} · {data.work.year || "未匹配年份"}</span><h1>{data.work.title}</h1><div className="work-actions"><button className="ghost accent" onClick={refreshMetadata} disabled={refreshing}>{refreshing ? "刮削中..." : "重新刮削"}</button>{message && <small>{message}</small>}</div><p className="description">{data.work.overview || "尚未匹配简介。可点击“重新刮削”，用豆瓣补齐中文简介和海报。"}</p>{data.work.kind === "show" ? <div className="episodes">{seasons.map((season) => { const episodes = Object.values(data.media.filter((item) => item.season === season).reduce<Record<string, Media>>((map, item) => { const key = String(item.episode); if (!map[key] || (item.size || 0) > (map[key].size || 0)) map[key] = item; return map; }, {})).sort((a, b) => (a.episode || 0) - (b.episode || 0)); return <div key={season}><h3>第 {season} 季 · {episodes.length} 集</h3>{episodes.map((item) => <Link className="episode" to={`/watch/${item.id}`} key={item.id}><span>S{String(item.season).padStart(2, "0")}E{String(item.episode).padStart(2, "0")}</span><b>第 {item.episode} 集</b><small>{item.size ? `${Math.round(item.size / 1024 / 1024)} MB` : ""}</small></Link>)}</div>; })}</div> : <Link className="primary play" to={`/watch/${data.media[0]?.id}`}>▶ 开始播放</Link>}</section></main>;
 }
 
-function Player() { const { id } = useParams(); const navigate = useNavigate(); const [item, setItem] = useState<Media>(); const [error, setError] = useState(""); const [video, setVideo] = useState<HTMLVideoElement | null>(null); useEffect(() => { api<Media>(`/media/${id}`).then(setItem); }, [id]); async function transcode() { if (!video || video.dataset.transcoding) return; video.dataset.transcoding = "true"; setError("原格式不兼容，正在启动 FFmpeg 转码..."); try { const result = await api<{ playlist: string }>(`/media/${id}/transcode`, { method: "POST" }); const source = `${result.playlist}?token=${getToken()}`; if (Hls.isSupported()) { const hls = new Hls({ xhrSetup: (xhr) => xhr.setRequestHeader("Authorization", `Bearer ${getToken()}`) }); hls.loadSource(source); hls.attachMedia(video); } else { video.src = source; } setError(""); } catch (e) { setError((e as Error).message); } } function save(element: HTMLVideoElement) { if (!Number.isFinite(element.duration)) return; api(`/media/${id}/progress`, { method: "PUT", body: JSON.stringify({ position: element.currentTime, duration: element.duration, completed: element.duration - element.currentTime < 90 }) }).catch(() => {}); } return <main className="player-page"><button className="player-back" onClick={() => navigate(-1)}>← 返回</button><video ref={setVideo} controls autoPlay src={`/api/media/${id}/file?token=${getToken()}`} onLoadedMetadata={(e) => { if (item?.position) e.currentTarget.currentTime = item.position; }} onTimeUpdate={(e) => { if (Math.floor(e.currentTarget.currentTime) % 10 === 0) save(e.currentTarget); }} onPause={(e) => save(e.currentTarget)} onError={transcode}/><div className="player-title"><span>正在播放</span><strong>{item?.title}</strong>{error && <p className="error">{error}</p>}</div></main>; }
+function Player() { const { id } = useParams(); const navigate = useNavigate(); const [item, setItem] = useState<Media>(); const [error, setError] = useState(""); const [video, setVideo] = useState<HTMLVideoElement | null>(null); useEffect(() => { api<Media>(`/media/${id}`).then(setItem); }, [id]); async function transcode() { if (!video || video.dataset.transcoding) return; video.dataset.transcoding = "true"; setError("原格式不兼容，正在启动 FFmpeg 转码..."); try { const result = await api<{ playlist: string }>(`/media/${id}/transcode`, { method: "POST" }); const source = `${result.playlist}?token=${getToken()}`; if (Hls.isSupported()) { const hls = new Hls({ xhrSetup: (xhr) => xhr.setRequestHeader("Authorization", `Bearer ${getToken()}`) }); hls.loadSource(source); hls.attachMedia(video); } else { video.src = source; } setError(""); } catch (e) { setError((e as Error).message); } } function save(element: HTMLVideoElement) { if (!Number.isFinite(element.duration)) return; api(`/media/${id}/progress`, { method: "PUT", body: JSON.stringify({ position: element.currentTime, duration: element.duration, completed: element.duration - element.currentTime < 90 }) }).catch(() => {}); }
+  const seekStateRef = useRef({ longPressActive: false, longPressTimer: 0 as number | undefined, previousRate: 1, pressedKey: "" as "" | "ArrowRight" | "ArrowLeft" });
+  useEffect(() => {
+    if (!video) return;
+    const LONG_PRESS_DELAY = 400;
+    const SEEK_SECONDS = 5;
+    function clearLongPressTimer() { const state = seekStateRef.current; if (state.longPressTimer !== undefined) { window.clearTimeout(state.longPressTimer); state.longPressTimer = undefined; } }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.target instanceof HTMLElement && ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) return;
+      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+      if (!video) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.repeat) return;
+      const state = seekStateRef.current;
+      if (state.pressedKey === event.key) return;
+      state.pressedKey = event.key as "ArrowRight" | "ArrowLeft";
+      state.longPressActive = false;
+      state.previousRate = video.playbackRate;
+      clearLongPressTimer();
+      state.longPressTimer = window.setTimeout(() => {
+        state.longPressActive = true;
+        video!.playbackRate = event.key === "ArrowRight" ? 2 : 0.5;
+      }, LONG_PRESS_DELAY);
+    }
+    function onKeyUp(event: KeyboardEvent) {
+      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+      if (!video) return;
+      const state = seekStateRef.current;
+      if (state.pressedKey !== event.key) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      clearLongPressTimer();
+      if (state.longPressActive) {
+        video.playbackRate = state.previousRate;
+        state.longPressActive = false;
+      } else {
+        video.currentTime += event.key === "ArrowRight" ? SEEK_SECONDS : -SEEK_SECONDS;
+      }
+      state.pressedKey = "";
+    }
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    return () => { window.removeEventListener("keydown", onKeyDown, true); window.removeEventListener("keyup", onKeyUp, true); clearLongPressTimer(); };
+  }, [video]);
+  return <main className="player-page"><button className="player-back" onClick={() => navigate(-1)}>← 返回</button><video ref={setVideo} controls autoPlay src={`/api/media/${id}/file?token=${getToken()}`} onLoadedMetadata={(e) => { if (item?.position) e.currentTarget.currentTime = item.position; }} onTimeUpdate={(e) => { if (Math.floor(e.currentTarget.currentTime) % 10 === 0) save(e.currentTarget); }} onPause={(e) => save(e.currentTarget)} onError={transcode}/><div className="player-title"><span>正在播放</span><strong>{item?.title}</strong>{error && <p className="error">{error}</p>}</div></main>; }
 
 const emptySourceForm = { name: "", type: "webdav", basePath: "", username: "", password: "" };
 
