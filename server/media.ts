@@ -95,12 +95,17 @@ export async function scanSource(sourceId: number, signal?: AbortSignal, progres
   return files.length;
 }
 
-export async function probe(file: string) {
+export async function probe(file: string, signal?: AbortSignal) {
   return new Promise<Record<string, any>>((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("已取消", "AbortError"));
     const child = spawn(config.ffprobe, ["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file]);
     let output = ""; let error = "";
     child.stdout.on("data", (data) => { output += data; }); child.stderr.on("data", (data) => { error += data; });
-    child.on("close", (code) => code === 0 ? resolve(JSON.parse(output)) : reject(new Error(error || "ffprobe failed")));
+    const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} reject(new Error("ffprobe 超时")); }, 30000);
+    const onAbort = () => { try { child.kill("SIGKILL"); } catch {} reject(new DOMException("已取消", "AbortError")); };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.on("error", (err) => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); reject(new Error(error || err.message || "ffprobe 启动失败")); });
+    child.on("close", (code) => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); code === 0 ? resolve(JSON.parse(output)) : reject(new Error(error || "ffprobe failed")); });
   });
 }
 

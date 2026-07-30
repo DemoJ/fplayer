@@ -139,5 +139,3 @@ export function rebuildCatalog(sourceId?: number) {
     db.prepare("DELETE FROM works WHERE NOT EXISTS(SELECT 1 FROM media WHERE media.work_id=works.id AND media.available=1)").run();
   })();
 }
-
-rebuildCatalog();

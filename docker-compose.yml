@@ -7,7 +7,6 @@ services:
     environment:
       APP_SECRET: c699a24b5bd628fb002cd2e1bc74bd1fae771f2bd5257c20e344ecfe6c9a3f5a
       DATA_DIR: /data
-      SECURE_COOKIES: "false"
     volumes:
       - ./data:/data
       # 需要读取 NAS 本地媒体目录时，取消注释并把左侧改成实际路径

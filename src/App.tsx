@@ -1,23 +1,49 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
-import { api, clearToken, getToken, setToken, type BrowseResult, type Media, type ScanJob, type Source, type User, type Work } from "./api";
+import { api, authUrl, clearToken, getToken, setOnUnauthorized, setToken, type BrowseResult, type Media, type ScanJob, type Source, type User, type Work } from "./api";
 
-function Auth({ initialized, onLogin }: { initialized: boolean; onLogin: (user: User) => void }) {
+function Auth({ initialized, onLogin, onSetupDone }: { initialized: boolean; onLogin: (user: User) => void; onSetupDone: () => void }) {
   const [username, setUsername] = useState(""); const [password, setPassword] = useState(""); const [error, setError] = useState("");
-  async function submit(event: React.FormEvent) { event.preventDefault(); setError(""); try { if (!initialized) await api("/setup", { method: "POST", body: JSON.stringify({ username, password }) }); const result = await api<{ token: string; user: User }>("/login", { method: "POST", body: JSON.stringify({ username, password }) }); setToken(result.token); onLogin(result.user); } catch (e) { setError((e as Error).message); } }
-  return <main className="auth-page"><section className="auth-copy"><span className="eyebrow">YOUR SCREEN. YOUR STORAGE.</span><h1>让收藏，<br />重新开场。</h1><p>连接 NAS 与 WebDAV，在任何浏览器中进入你的私人放映室。</p></section><form className="auth-card" onSubmit={submit}><div className="brand-mark">F</div><div><span className="eyebrow">FPLAYER</span><h2>{initialized ? "欢迎回来" : "创建管理员"}</h2></div><label>用户名<input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus required /></label><label>密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={8} required /></label>{error && <p className="error">{error}</p>}<button className="primary" type="submit">{initialized ? "进入媒体库" : "创建并进入"}</button><small>{initialized ? "使用你的本地账户登录" : "首个账户将成为系统管理员"}</small></form></main>;
+  async function submit(event: React.FormEvent) {
+    event.preventDefault(); setError("");
+    try {
+      if (!initialized) { await api("/setup", { method: "POST", body: JSON.stringify({ username, password }) }); onSetupDone(); }
+      const result = await api<{ token: string; user: User }>("/login", { method: "POST", body: JSON.stringify({ username, password }) });
+      setToken(result.token); onLogin(result.user);
+    } catch (e) { setError((e as Error).message); }
+  }
+  return <main className="auth-page"><section className="auth-copy"><span className="eyebrow">YOUR SCREEN. YOUR STORAGE.</span><h1>让收藏，<br />重新开场。</h1><p>连接 NAS 与 WebDAV，在任何浏览器中进入你的私人放映室。</p></section><form className="auth-card" onSubmit={submit}><div className="brand-mark">F</div><div><span className="eyebrow">FPLAYER</span><h2>{initialized ? "欢迎回来" : "创建管理员"}</h2></div><label>用户名<input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus required /></label><label>密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={initialized ? undefined : 8} required /></label>{error && <p className="error">{error}</p>}<button className="primary" type="submit">{initialized ? "进入媒体库" : "创建并进入"}</button><small>{initialized ? "使用你的本地账户登录" : "首个账户将成为系统管理员"}</small></form></main>;
 }
 
 function Layout({ user, logout }: { user: User; logout: () => void }) {
   const location = useLocation(); const [jobs, setJobs] = useState<ScanJob[]>([]);
-  useEffect(() => { let active = true; const refresh = () => api<ScanJob[]>("/scans").then((rows) => { if (active) setJobs(rows); }).catch(() => {}); refresh(); const timer = window.setInterval(refresh, 1500); return () => { active = false; window.clearInterval(timer); }; }, []);
+  useEffect(() => {
+    let active = true; let timer = 0;
+    const refresh = () => api<ScanJob[]>("/scans").then((rows) => { if (active) setJobs(rows); }).catch(() => {});
+    refresh();
+    // Poll only while there are active jobs; stop the interval once idle.
+    const hasActive = () => jobs.some((job) => ["queued", "running"].includes(job.status));
+    if (hasActive()) timer = window.setInterval(refresh, 1500);
+    return () => { active = false; if (timer) window.clearInterval(timer); };
+  }, [jobs]);
   async function dismiss(job: ScanJob) { await api(`/scans/${job.id}/acknowledge`, { method: "POST" }); setJobs((current) => current.filter((item) => item.id !== job.id)); }
   const finished = jobs.filter((job) => ["completed", "failed", "cancelled"].includes(job.status));
-  return <div className="shell"><aside><Link className="logo" to="/"><span>F</span> FPLAYER</Link><nav><Link className={location.pathname === "/" ? "active" : ""} to="/">⌂ <span>首页</span></Link><Link className={location.pathname.startsWith("/movies") ? "active" : ""} to="/movies">◫ <span>电影</span></Link><Link className={location.pathname.startsWith("/shows") ? "active" : ""} to="/shows">▤ <span>剧集</span></Link><Link className={location.pathname.startsWith("/admin") ? "active" : ""} to="/admin">⚙ <span>媒体源</span></Link></nav><div className="account"><div className="avatar">{user.username[0].toUpperCase()}</div><div><strong>{user.username}</strong><button onClick={logout}>退出登录</button></div></div></aside><div className="content"><Routes><Route path="/" element={<Home />} /><Route path="/movies" element={<Library kind="movie" />} /><Route path="/shows" element={<Library kind="show" />} /><Route path="/browse" element={<BrowseView />} /><Route path="/browse/:sourceId" element={<BrowseView />} /><Route path="/work/:id" element={<WorkDetail />} /><Route path="/media/:id" element={<Detail />} /><Route path="/watch/:id" element={<Player />} /><Route path="/admin" element={<SourceAdmin jobs={jobs} refreshJobs={(rows) => setJobs(rows)} />} /></Routes></div>{finished.length > 0 && <div className="notifications">{finished.map((job) => <article className={`toast ${job.status}`} key={job.id}><div><strong>{job.source_name}：{job.status === "completed" ? "扫描完成" : job.status === "cancelled" ? "扫描已停止" : "扫描失败"}</strong><p>{job.status === "completed" ? `共发现并更新 ${job.result_count || 0} 个媒体文件` : job.error}</p></div><button onClick={() => dismiss(job)}>×</button></article>)}</div>}</div>;
+  return <div className="shell"><aside><Link className="logo" to="/"><span>F</span> FPLAYER</Link><nav><Link className={location.pathname === "/" ? "active" : ""} to="/" aria-label="首页">⌂ <span>首页</span></Link><Link className={location.pathname.startsWith("/movies") ? "active" : ""} to="/movies" aria-label="电影">◫ <span>电影</span></Link><Link className={location.pathname.startsWith("/shows") ? "active" : ""} to="/shows" aria-label="剧集">▤ <span>剧集</span></Link><Link className={location.pathname.startsWith("/admin") ? "active" : ""} to="/admin" aria-label="媒体源">⚙ <span>媒体源</span></Link></nav><div className="account"><div className="avatar">{user.username[0].toUpperCase()}</div><div><strong>{user.username}</strong><button onClick={logout}>退出登录</button></div></div></aside><div className="content"><Routes><Route path="/" element={<Home />} /><Route path="/movies" element={<Library kind="movie" />} /><Route path="/shows" element={<Library kind="show" />} /><Route path="/browse" element={<BrowseView />} /><Route path="/browse/:sourceId" element={<BrowseView />} /><Route path="/work/:id" element={<WorkDetail />} /><Route path="/media/:id" element={<Detail />} /><Route path="/watch/:id" element={<Player />} /><Route path="/admin" element={<SourceAdmin jobs={jobs} refreshJobs={(rows) => setJobs(rows)} />} /></Routes></div>{finished.length > 0 && <div className="notifications">{finished.map((job) => <article className={`toast ${job.status}`} key={job.id}><div><strong>{job.source_name}：{job.status === "completed" ? "扫描完成" : job.status === "cancelled" ? "扫描已停止" : "扫描失败"}</strong><p>{job.status === "completed" ? `共发现并更新 ${job.result_count || 0} 个媒体文件` : job.error}</p></div><button aria-label="关闭" onClick={() => dismiss(job)}>×</button></article>)}</div>}</div>;
 }
 
-function posterUrl(value?: string) { return value ? `${value}?token=${getToken()}` : undefined; }
+// Loads a protected poster/artwork as a blob URL so the auth token stays in the
+// Authorization header instead of leaking into the image URL (history/logs).
+function PosterBg({ path, className, children }: { path?: string; className?: string; children?: React.ReactNode }) {
+  const [url, setUrl] = useState<string>();
+  useEffect(() => {
+    if (!path) return;
+    let active = true;
+    authUrl(path).then((u) => { if (active) setUrl(u); });
+    return () => { active = false; };
+  }, [path]);
+  return <div className={className} style={url ? { backgroundImage: `url(${url})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}>{children}</div>;
+}
 
 function LibraryBack({ kind }: { kind?: "movie" | "show" }) {
   const navigate = useNavigate();
@@ -33,10 +59,11 @@ function Home() {
   const [continued, setContinued] = useState<Media[]>([]);
   const [recent, setRecent] = useState<Media[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   useEffect(() => {
-    setLoading(true);
+    setLoading(true); setLoadError("");
     Promise.all([
-      api<BrowseResult>("/browse").then((data) => setSources(data.sources || [])),
+      api<BrowseResult>("/browse").then((data) => setSources(data.sources || [])).catch((e) => { setSources([]); setLoadError((e as Error).message); }),
       api<Media[]>("/continue?limit=12").then(setContinued).catch(() => setContinued([])),
       api<Media[]>("/recent?limit=10").then(setRecent).catch(() => setRecent([])),
     ]).finally(() => setLoading(false));
@@ -45,7 +72,7 @@ function Home() {
     <header className="topbar"><div><span className="eyebrow">PRIVATE CINEMA</span><h1>今晚，看点什么？</h1></div></header>
     <section className="media-section">
       <div className="section-heading"><h2>我的媒体</h2><span>{sources.length} 个</span></div>
-      {loading ? <div className="empty">正在载入媒体源...</div> : sources.length === 0 ? <div className="empty"><strong>还没有媒体源</strong><span>前往“媒体源”添加 NAS 或 WebDAV。</span><Link className="text-link" to="/admin">添加媒体源 →</Link></div> : <div className="folder-grid">{sources.map((source) => <Link className="folder-card" key={source.id} to={`/browse/${source.id}`}><div className="folder-icon">{source.type === "webdav" ? "W" : "N"}</div><div><h3>{source.name}</h3><p>{source.file_count || 0} 个媒体文件</p><small>{source.base_path}</small></div></Link>)}</div>}
+      {loading ? <div className="empty">正在载入媒体源...</div> : loadError ? <div className="empty"><strong>媒体源加载失败</strong><span>{loadError}</span></div> : sources.length === 0 ? <div className="empty"><strong>还没有媒体源</strong><span>前往“媒体源”添加 NAS 或 WebDAV。</span><Link className="text-link" to="/admin">添加媒体源 →</Link></div> : <div className="source-grid">{sources.map((source, index) => <Link className="source-tile" key={source.id} to={`/browse/${source.id}`}><div className={`source-cover art-${index % 6}`}><span className="source-type">{source.type === "webdav" ? "WebDAV" : "NAS"}</span><b className="source-mark">{source.type === "webdav" ? "W" : "N"}</b><span className="source-count">{source.file_count || 0}<small>个文件</small></span></div><div className="source-meta"><h3>{source.name}</h3><small>{source.base_path}</small></div></Link>)}</div>}
     </section>
     <MediaSection title="最近播放" items={continued} wide emptyText="还没有未看完的内容" />
     <MediaSection title="最近添加" items={recent} wide emptyText="暂无新增媒体" />
@@ -58,9 +85,17 @@ function Library({ kind }: { kind: "movie" | "show" }) {
   const [loading, setLoading] = useState(true);
   const [refreshingId, setRefreshingId] = useState<number>();
   const [message, setMessage] = useState("");
+  const reqIdRef = useRef(0);
   useEffect(() => {
     setLoading(true);
-    api<Work[]>(`/works?kind=${kind}&q=${encodeURIComponent(query)}`).then(setItems).finally(() => setLoading(false));
+    const reqId = ++reqIdRef.current;
+    const handle = window.setTimeout(() => {
+      api<Work[]>(`/works?kind=${kind}&q=${encodeURIComponent(query)}`).then((rows) => {
+        // Only keep the result of the latest request to avoid stale overwrites.
+        if (reqId === reqIdRef.current) setItems(rows);
+      }).catch(() => {}).finally(() => { if (reqId === reqIdRef.current) setLoading(false); });
+    }, 300);
+    return () => window.clearTimeout(handle);
   }, [kind, query]);
   async function refreshItem(id: number) {
     setRefreshingId(id); setMessage("");
@@ -76,7 +111,7 @@ function Library({ kind }: { kind: "movie" | "show" }) {
       <div><span className="eyebrow">PRIVATE CINEMA</span><h1>{kind === "movie" ? "电影" : "剧集"}</h1></div>
       <label className="search">⌕<input placeholder="搜索片名" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
     </header>
-    {message && <div className="admin-toast">{message}<button type="button" onClick={() => setMessage("")}>×</button></div>}
+    {message && <div className="admin-toast">{message}<button type="button" aria-label="关闭" onClick={() => setMessage("")}>×</button></div>}
     <WorkSection title={`全部${kind === "movie" ? "电影" : "剧集"}`} items={items} loading={loading} refreshingId={refreshingId} onRefresh={refreshItem} />
   </main>;
 }
@@ -94,7 +129,7 @@ function WorkSection({ title, items, loading, refreshingId, onRefresh }: { title
   }, [menuId]);
   return <section className="media-section">
     <div className="section-heading"><h2>{title}</h2><span>{items.length} 部</span></div>
-    {loading ? <div className="empty">正在整理作品...</div> : items.length === 0 ? <div className="empty"><strong>银幕还没有亮起</strong><span>前往“媒体源”扫描你的影视目录。</span><Link className="text-link" to="/admin">管理媒体源 →</Link></div> : <div className="poster-grid">{items.map((item, index) => <article className="media-card" key={item.id}><Link className="poster-card" to={`/work/${item.id}`}><div className={`poster art-${index % 6}`} style={item.poster_path ? { backgroundImage: `url(${posterUrl(item.poster_path)})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}><span>{item.kind === "show" ? "SERIES" : "FILM"}</span><b>{item.poster_path ? "" : item.title.slice(0, 1)}</b></div><h3>{item.title}</h3><p>{item.year || "未匹配年份"} · {item.kind === "show" ? `${item.season_count} 季` : `${item.file_count} 个版本`}</p></Link><button className="media-more" type="button" aria-label="更多操作" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setMenuId(menuId === item.id ? undefined : item.id); }}>⋯</button>{menuId === item.id && <div className="media-menu"><button type="button" disabled={refreshingId === item.id} onClick={() => { setMenuId(undefined); onRefresh?.(item.id); }}>{refreshingId === item.id ? "刮削中..." : "重新刮削"}</button><button type="button" onClick={() => { setMenuId(undefined); setManageWork(item); }}>编辑文件信息</button><button type="button" className="danger-text" onClick={() => { setMenuId(undefined); setManageWork(item); }}>删除文件</button></div>}</article>)}</div>}
+    {loading ? <div className="empty">正在整理作品...</div> : items.length === 0 ? <div className="empty"><strong>银幕还没有亮起</strong><span>前往“媒体源”扫描你的影视目录。</span><Link className="text-link" to="/admin">管理媒体源 →</Link></div> : <div className="poster-grid">{items.map((item, index) => <article className="media-card" key={item.id}><Link className="poster-card" to={`/work/${item.id}`}><PosterBg path={item.poster_path} className={`poster art-${index % 6}`}><span>{item.kind === "show" ? "SERIES" : "FILM"}</span><b>{item.poster_path ? "" : item.title.slice(0, 1)}</b></PosterBg><h3>{item.title}</h3><p>{item.year || "未匹配年份"} · {item.kind === "show" ? `${item.season_count} 季` : `${item.file_count} 个版本`}</p></Link><button className="media-more" type="button" aria-label="更多操作" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setMenuId(menuId === item.id ? undefined : item.id); }}>⋯</button>{menuId === item.id && <div className="media-menu"><button type="button" disabled={refreshingId === item.id} onClick={() => { setMenuId(undefined); onRefresh?.(item.id); }}>{refreshingId === item.id ? "刮削中..." : "重新刮削"}</button><button type="button" onClick={() => { setMenuId(undefined); setManageWork(item); }}>编辑文件信息</button><button type="button" className="danger-text" onClick={() => { setMenuId(undefined); setManageWork(item); }}>删除文件</button></div>}</article>)}</div>}
     {manageWork && <WorkFilesDialog work={manageWork} onClose={() => setManageWork(undefined)} />}
   </section>;
 }
@@ -109,7 +144,7 @@ function WorkFilesDialog({ work, onClose }: { work: Work; onClose: () => void })
     try { await api(`/media/${item.id}`, { method: "DELETE" }); setData((current) => current ? { ...current, media: current.media.filter((file) => file.id !== item.id) } : current); }
     catch (error) { window.alert((error as Error).message); }
   }
-  return <div className="drawer-mask" onClick={onClose}><div className="drawer" onClick={(e) => e.stopPropagation()}><div className="drawer-head"><div><span className="eyebrow">MEDIA FILES</span><h2>{work.title}</h2></div><button type="button" className="icon-close" onClick={onClose}>×</button></div><p className="drawer-desc">这里管理该作品下的全部媒体文件。编辑会同步修改实际文件信息，删除会删除实际文件。</p><div className="work-files-list">{data.media.length === 0 ? <div className="empty">没有可用文件</div> : data.media.map((item) => <div className="work-file-row" key={item.id}><div><strong>{item.kind === "show" && item.season ? `S${String(item.season).padStart(2, "0")}E${String(item.episode || 0).padStart(2, "0")}` : item.title}</strong><small>{item.path.split("/").pop()}</small></div><div><button className="ghost" type="button" onClick={() => setEditing(item)}>编辑</button><button className="ghost danger" type="button" onClick={() => void remove(item)}>删除</button></div></div>)}</div><div className="drawer-actions"><button type="button" className="secondary" onClick={onClose}>关闭</button></div>{editing && <MediaEditDialog item={editing} onClose={() => setEditing(undefined)} onSaved={() => { setEditing(undefined); onClose(); }} />}</div></div>;
+  return <div className="drawer-mask" onClick={onClose}><div className="drawer" onClick={(e) => e.stopPropagation()}><div className="drawer-head"><div><span className="eyebrow">MEDIA FILES</span><h2>{work.title}</h2></div><button type="button" className="icon-close" aria-label="关闭" onClick={onClose}>×</button></div><p className="drawer-desc">这里管理该作品下的全部媒体文件。编辑会同步修改实际文件信息，删除会删除实际文件。</p><div className="work-files-list">{data.media.length === 0 ? <div className="empty">没有可用文件</div> : data.media.map((item) => <div className="work-file-row" key={item.id}><div><strong>{item.kind === "show" && item.season ? `S${String(item.season).padStart(2, "0")}E${String(item.episode || 0).padStart(2, "0")}` : item.title}</strong><small>{item.path.split("/").pop()}</small></div><div><button className="ghost" type="button" onClick={() => setEditing(item)}>编辑</button><button className="ghost danger" type="button" onClick={() => void remove(item)}>删除</button></div></div>)}</div><div className="drawer-actions"><button type="button" className="secondary" onClick={onClose}>关闭</button></div>{editing && <MediaEditDialog item={editing} onClose={() => setEditing(undefined)} onSaved={() => { setEditing(undefined); onClose(); }} />}</div></div>;
 }
 
 function MediaSection({ title, items, loading, wide = false, emptyText }: { title: string; items: Media[]; loading?: boolean; wide?: boolean; emptyText?: string }) {
@@ -128,9 +163,14 @@ function MediaSection({ title, items, loading, wide = false, emptyText }: { titl
   }, [menuId]);
   async function remove(item: Media) {
     if (!window.confirm(`确定删除「${item.title}」对应的文件吗？此操作不可恢复。`)) return;
-    await api(`/media/${item.id}`, { method: "DELETE" });
-    setRemoved((current) => new Set(current).add(item.id));
-    setMenuId(undefined);
+    try {
+      await api(`/media/${item.id}`, { method: "DELETE" });
+      setRemoved((current) => new Set(current).add(item.id));
+      setMenuId(undefined);
+    } catch (error) {
+      window.alert((error as Error).message);
+      setMenuId(undefined);
+    }
   }
   async function refresh(item: Media) {
     if (!item.work_id || refreshingWorkId) return;
@@ -144,11 +184,11 @@ function MediaSection({ title, items, loading, wide = false, emptyText }: { titl
       const percent = item.position && item.progress_duration ? Math.min(100, (item.position / item.progress_duration) * 100) : 0;
       const poster = item.work_poster;
       return <article className="media-card" key={item.id}><Link className="poster-card" to={`/watch/${item.id}`}>
-        <div className={`poster art-${index % 6}`} style={poster ? { backgroundImage: `url(${posterUrl(poster)})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}>
+        <PosterBg path={poster} className={`poster art-${index % 6}`}>
           <span>{item.kind === "show" ? "SERIES" : "FILM"}</span>
           <b>{poster ? "" : item.title.slice(0, 1)}</b>
           {percent > 0 && <i style={{ width: `${percent}%` }} />}
-        </div>
+        </PosterBg>
         <h3>{item.title}</h3>
         <p>{item.kind === "show" && item.season ? `第 ${item.season} 季 · 第 ${item.episode} 集` : item.source_name || item.container?.toUpperCase() || "视频"}{percent > 0 ? ` · 已看 ${Math.round(percent)}%` : ""}</p>
       </Link><button className="media-more" type="button" aria-label="更多操作" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setMenuId(menuId === item.id ? undefined : item.id); }}>⋯</button>{menuId === item.id && <div className="media-menu"><button type="button" disabled={!item.work_id || refreshingWorkId === item.work_id} onClick={() => void refresh(item)}>{refreshingWorkId === item.work_id ? "刮削中..." : "重新刮削"}</button><button type="button" onClick={() => { setEditing(item); setMenuId(undefined); }}>编辑文件信息</button><button type="button" className="danger-text" onClick={() => void remove(item)}>删除文件</button></div>}</article>;
@@ -161,7 +201,7 @@ function MediaEditDialog({ item, onClose, onSaved }: { item: Media; onClose: () 
   const [form, setForm] = useState({ name: item.path.split("/").pop() || "", title: item.title, season: item.season ? String(item.season) : "", episode: item.episode ? String(item.episode) : "" });
   const [error, setError] = useState("");
   async function save(event: React.FormEvent) { event.preventDefault(); try { await api(`/media/${item.id}`, { method: "PUT", body: JSON.stringify(form) }); onSaved(); window.location.reload(); } catch (e) { setError((e as Error).message); } }
-  return <div className="drawer-mask" onClick={onClose}><form className="drawer" onClick={(e) => e.stopPropagation()} onSubmit={save}><div className="drawer-head"><div><span className="eyebrow">MEDIA FILE</span><h2>修改文件信息</h2></div><button type="button" className="icon-close" onClick={onClose}>×</button></div><p className="drawer-desc">修改文件名会同步重命名实际媒体文件，原始路径目录保持不变。</p><label>原始文件名<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></label><label>显示标题<input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} required /></label><div className="media-edit-row"><label>季<input type="number" min="1" value={form.season} onChange={(e) => setForm({ ...form, season: e.target.value })} /></label><label>集<input type="number" min="1" value={form.episode} onChange={(e) => setForm({ ...form, episode: e.target.value })} /></label></div>{error && <p className="error">{error}</p>}<div className="drawer-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button className="primary" type="submit">保存修改</button></div></form></div>;
+  return <div className="drawer-mask" onClick={onClose}><form className="drawer" onClick={(e) => e.stopPropagation()} onSubmit={save}><div className="drawer-head"><div><span className="eyebrow">MEDIA FILE</span><h2>修改文件信息</h2></div><button type="button" className="icon-close" aria-label="关闭" onClick={onClose}>×</button></div><p className="drawer-desc">修改文件名会同步重命名实际媒体文件，原始路径目录保持不变。</p><label>原始文件名<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></label><label>显示标题<input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} required /></label><div className="media-edit-row"><label>季<input type="number" min="1" value={form.season} onChange={(e) => setForm({ ...form, season: e.target.value })} /></label><label>集<input type="number" min="1" value={form.episode} onChange={(e) => setForm({ ...form, episode: e.target.value })} /></label></div>{error && <p className="error">{error}</p>}<div className="drawer-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button className="primary" type="submit">保存修改</button></div></form></div>;
 }
 
 function BrowseView() {
@@ -173,7 +213,7 @@ function BrowseView() {
   const [data, setData] = useState<BrowseResult>();
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { setSourceId(Number(params.sourceId || 0)); setPath(""); }, [params.sourceId]);
+  useEffect(() => { setSourceId(Number(params.sourceId || 0)); setPath(""); setData(undefined); }, [params.sourceId]);
   useEffect(() => {
     if (!sourceId) {
       navigate("/", { replace: true });
@@ -211,15 +251,16 @@ function BrowseView() {
   </main>;
 }
 
-function Detail() { const { id } = useParams(); const [item, setItem] = useState<Media>(); useEffect(() => { api<Media>(`/media/${id}`).then(setItem); }, [id]); if (!item) return <div className="empty">载入中...</div>; return <main className="detail"><div className="detail-top"><LibraryBack kind={item.kind} /></div><div className="detail-art"><span>{item.kind === "show" ? "ORIGINAL SERIES" : "FEATURE PRESENTATION"}</span><b>{item.title.slice(0, 1)}</b></div><section><span className="eyebrow">{item.kind === "show" ? "剧集" : "电影"} · {item.source_name}</span><h1>{item.title}</h1><p className="meta">{item.container?.toUpperCase() || "VIDEO"}　{item.video_codec || "待探测"}　{item.duration ? `${Math.round(item.duration / 60)} 分钟` : ""}</p><p className="description">来自你的私人媒体库。FPlayer 会通过安全的服务端链路读取文件，并自动保存观看进度。</p><Link className="primary play" to={`/watch/${item.id}`}>{item.position ? "▶ 继续播放" : "▶ 开始播放"}</Link></section></main>; }
+function Detail() { const { id } = useParams(); const [item, setItem] = useState<Media>(); const [error, setError] = useState(""); useEffect(() => { setItem(undefined); setError(""); api<Media>(`/media/${id}`).then(setItem).catch((e) => setError((e as Error).message)); }, [id]); if (error) return <main className="detail"><div className="empty"><strong>载入失败</strong><p>{error}</p><Link className="text-link" to="/" onClick={(e) => { e.preventDefault(); location.reload(); }}>重试</Link></div></main>; if (!item) return <div className="empty">载入中...</div>; return <main className="detail"><div className="detail-top"><LibraryBack kind={item.kind} /></div><div className="detail-art"><span>{item.kind === "show" ? "ORIGINAL SERIES" : "FEATURE PRESENTATION"}</span><b>{item.title.slice(0, 1)}</b></div><section><span className="eyebrow">{item.kind === "show" ? "剧集" : "电影"} · {item.source_name}</span><h1>{item.title}</h1><p className="meta">{item.container?.toUpperCase() || "VIDEO"}　{item.video_codec || "待探测"}　{item.duration ? `${Math.round(item.duration / 60)} 分钟` : ""}</p><p className="description">来自你的私人媒体库。FPlayer 会通过安全的服务端链路读取文件，并自动保存观看进度。</p><Link className="primary play" to={`/watch/${item.id}`}>{item.position ? "▶ 继续播放" : "▶ 开始播放"}</Link></section></main>; }
 
 function WorkDetail() {
   const { id } = useParams();
   const [data, setData] = useState<{ work: Work; media: Media[] }>();
   const [message, setMessage] = useState("");
   const [refreshing, setRefreshing] = useState(false);
-  const load = () => api<{ work: Work; media: Media[] }>(`/works/${id}`).then(setData);
-  useEffect(() => { void load(); }, [id]);
+  const [loadError, setLoadError] = useState("");
+  const load = () => api<{ work: Work; media: Media[] }>(`/works/${id}`).then((d) => { setData(d); setLoadError(""); }).catch((e) => setLoadError((e as Error).message));
+  useEffect(() => { setData(undefined); setLoadError(""); void load(); }, [id]);
   async function refreshMetadata() {
     if (!id || refreshing) return;
     setRefreshing(true); setMessage("正在重新刮削...");
@@ -227,18 +268,76 @@ function WorkDetail() {
     catch (error) { setMessage((error as Error).message); }
     finally { setRefreshing(false); }
   }
+  if (loadError) return <div className="empty"><strong>载入失败</strong><p>{loadError}</p><button className="text-link" type="button" onClick={() => void load()}>重试</button></div>;
   if (!data) return <div className="empty">载入作品...</div>;
   const seasons = [...new Set(data.media.map((item) => item.season).filter(Boolean))] as number[];
-  return <main className="work-detail"><div className="work-detail-top"><LibraryBack kind={data.work.kind} /></div><div className="detail-art" style={data.work.poster_path ? { backgroundImage: `url(${posterUrl(data.work.poster_path)})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}><b>{data.work.poster_path ? "" : data.work.title.slice(0, 1)}</b></div><section><span className="eyebrow">{data.work.kind === "show" ? "剧集" : "电影"} · {data.work.year || "未匹配年份"}</span><h1>{data.work.title}</h1><div className="work-actions"><button className="ghost accent" onClick={refreshMetadata} disabled={refreshing}>{refreshing ? "刮削中..." : "重新刮削"}</button>{message && <small>{message}</small>}</div><p className="description">{data.work.overview || "尚未匹配简介。可点击“重新刮削”，用豆瓣补齐中文简介和海报。"}</p>{data.work.kind === "show" ? <div className="episodes">{seasons.map((season) => { const episodes = Object.values(data.media.filter((item) => item.season === season).reduce<Record<string, Media>>((map, item) => { const key = String(item.episode); if (!map[key] || (item.size || 0) > (map[key].size || 0)) map[key] = item; return map; }, {})).sort((a, b) => (a.episode || 0) - (b.episode || 0)); return <div key={season}><h3>第 {season} 季 · {episodes.length} 集</h3>{episodes.map((item) => <Link className="episode" to={`/watch/${item.id}`} key={item.id}><span>S{String(item.season).padStart(2, "0")}E{String(item.episode).padStart(2, "0")}</span><b>第 {item.episode} 集</b><small>{item.size ? `${Math.round(item.size / 1024 / 1024)} MB` : ""}</small></Link>)}</div>; })}</div> : <Link className="primary play" to={`/watch/${data.media[0]?.id}`}>▶ 开始播放</Link>}</section></main>;
+  return <main className="work-detail"><div className="work-detail-top"><LibraryBack kind={data.work.kind} /></div><PosterBg path={data.work.poster_path} className="detail-art"><b>{data.work.poster_path ? "" : data.work.title.slice(0, 1)}</b></PosterBg><section><span className="eyebrow">{data.work.kind === "show" ? "剧集" : "电影"} · {data.work.year || "未匹配年份"}</span><h1>{data.work.title}</h1><div className="work-actions"><button className="ghost accent" onClick={refreshMetadata} disabled={refreshing}>{refreshing ? "刮削中..." : "重新刮削"}</button>{message && <small>{message}</small>}</div><p className="description">{data.work.overview || "尚未匹配简介。可点击“重新刮削”，用豆瓣补齐中文简介和海报。"}</p>{data.work.kind === "show" ? <div className="episodes">{seasons.map((season) => { const episodes = Object.values(data.media.filter((item) => item.season === season).reduce<Record<string, Media>>((map, item) => { const key = String(item.episode); if (!map[key] || (item.size || 0) > (map[key].size || 0)) map[key] = item; return map; }, {})).sort((a, b) => (a.episode || 0) - (b.episode || 0)); return <div key={season}><h3>第 {season} 季 · {episodes.length} 集</h3>{episodes.map((item) => <Link className="episode" to={`/watch/${item.id}`} key={item.id}><span>S{String(item.season).padStart(2, "0")}E{String(item.episode).padStart(2, "0")}</span><b>第 {item.episode} 集</b><small>{item.size ? `${Math.round(item.size / 1024 / 1024)} MB` : ""}</small></Link>)}</div>; })}</div> : <Link className={`primary play ${data.media.length === 0 ? "disabled" : ""}`} to={data.media.length ? `/watch/${data.media[0].id}` : "#"} onClick={(e) => { if (!data.media.length) e.preventDefault(); }}>▶ 开始播放</Link>}</section></main>;
 }
 
-function Player() { const { id } = useParams(); const navigate = useNavigate(); const [item, setItem] = useState<Media>(); const [error, setError] = useState(""); const [video, setVideo] = useState<HTMLVideoElement | null>(null); useEffect(() => { api<Media>(`/media/${id}`).then(setItem); }, [id]); async function transcode() { if (!video || video.dataset.transcoding) return; video.dataset.transcoding = "true"; setError("原格式不兼容，正在启动 FFmpeg 转码..."); try { const result = await api<{ playlist: string }>(`/media/${id}/transcode`, { method: "POST" }); const source = `${result.playlist}?token=${getToken()}`; if (Hls.isSupported()) { const hls = new Hls({ xhrSetup: (xhr) => xhr.setRequestHeader("Authorization", `Bearer ${getToken()}`) }); hls.loadSource(source); hls.attachMedia(video); } else { video.src = source; } setError(""); } catch (e) { setError((e as Error).message); } } function save(element: HTMLVideoElement) { if (!Number.isFinite(element.duration)) return; api(`/media/${id}/progress`, { method: "PUT", body: JSON.stringify({ position: element.currentTime, duration: element.duration, completed: element.duration - element.currentTime < 90 }) }).catch(() => {}); }
+function Player() {
+  const { id } = useParams(); const navigate = useNavigate();
+  const [item, setItem] = useState<Media>(); const [error, setError] = useState("");
+  const [buffering, setBuffering] = useState(false);
+  const [needsTap, setNeedsTap] = useState(false);
+  const [video, setVideo] = useState<HTMLVideoElement | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
+  const lastSavedRef = useRef(0);
+  useEffect(() => {
+    let active = true;
+    api<Media>(`/media/${id}`).then((m) => { if (active) setItem(m); }).catch((e) => { if (active) setError((e as Error).message); });
+    return () => { active = false; };
+  }, [id]);
+
+  async function transcode() {
+    if (!video || video.dataset.transcoding) return;
+    // Only fall back to transcoding for format/decode issues, not transient errors.
+    const code = video.error?.code;
+    if (code === MediaError.MEDIA_ERR_NETWORK) { setError("网络错误，请稍后重试"); return; }
+    video.dataset.transcoding = "true";
+    setError("原格式不兼容，正在启动 FFmpeg 转码...");
+    setBuffering(true);
+    try {
+      const result = await api<{ playlist: string }>(`/media/${id}/transcode`, { method: "POST" });
+      // The playlist URL uses the session only; segments are authorized via a
+      // short-lived signature embedded by the server, so the main token never
+      // appears in the playlist/segment URLs.
+      const source = result.playlist;
+      if (Hls.isSupported()) {
+        hlsRef.current?.destroy();
+        const hls = new Hls({ xhrSetup: (xhr) => xhr.setRequestHeader("Authorization", `Bearer ${getToken()}`), fragLoadingMaxRetry: 6, fragLoadingRetryDelay: 800 });
+        hlsRef.current = hls;
+        hls.loadSource(source); hls.attachMedia(video);
+        hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) setError("转码播放失败，请重试"); });
+      } else {
+        // Native HLS (e.g. iOS): no custom headers possible, rely on the signed
+        // segment URLs rewritten by the server into the playlist.
+        video.src = source;
+      }
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+      if (video) video.dataset.transcoding = "";
+    } finally { setBuffering(false); }
+  }
+
+  function save(element: HTMLVideoElement, forceCompleted = false) {
+    if (!Number.isFinite(element.duration) || element.duration <= 0) return;
+    const now = Math.floor(element.currentTime);
+    // Throttle: at most one save per 5 seconds of playback advancement.
+    if (!forceCompleted && now - lastSavedRef.current < 5) return;
+    lastSavedRef.current = now;
+    const remaining = element.duration - element.currentTime;
+    const completed = forceCompleted || remaining < Math.min(90, element.duration * 0.05);
+    api(`/media/${id}/progress`, { method: "PUT", body: JSON.stringify({ position: element.currentTime, duration: element.duration, completed }) }).catch(() => {});
+  }
+
   const seekStateRef = useRef({ longPressActive: false, longPressTimer: 0 as number | undefined, previousRate: 1, pressedKey: "" as "" | "ArrowRight" | "ArrowLeft" });
   useEffect(() => {
     if (!video) return;
     const LONG_PRESS_DELAY = 400;
     const SEEK_SECONDS = 5;
     function clearLongPressTimer() { const state = seekStateRef.current; if (state.longPressTimer !== undefined) { window.clearTimeout(state.longPressTimer); state.longPressTimer = undefined; } }
+    function resetSeekState() { const state = seekStateRef.current; clearLongPressTimer(); if (state.longPressActive && video) video.playbackRate = state.previousRate; state.longPressActive = false; state.pressedKey = ""; }
     function onKeyDown(event: KeyboardEvent) {
       if (event.target instanceof HTMLElement && ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) return;
       if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
@@ -273,11 +372,33 @@ function Player() { const { id } = useParams(); const navigate = useNavigate(); 
       }
       state.pressedKey = "";
     }
+    const onBlur = () => resetSeekState();
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
-    return () => { window.removeEventListener("keydown", onKeyDown, true); window.removeEventListener("keyup", onKeyUp, true); clearLongPressTimer(); };
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onBlur);
+    return () => { window.removeEventListener("keydown", onKeyDown, true); window.removeEventListener("keyup", onKeyUp, true); window.removeEventListener("blur", onBlur); document.removeEventListener("visibilitychange", onBlur); clearLongPressTimer(); };
   }, [video]);
-  return <main className="player-page"><button className="player-back" onClick={() => navigate(-1)}>← 返回</button><video ref={setVideo} controls autoPlay src={`/api/media/${id}/file?token=${getToken()}`} onLoadedMetadata={(e) => { if (item?.position) e.currentTarget.currentTime = item.position; }} onTimeUpdate={(e) => { if (Math.floor(e.currentTarget.currentTime) % 10 === 0) save(e.currentTarget); }} onPause={(e) => save(e.currentTarget)} onError={transcode}/><div className="player-title"><span>正在播放</span><strong>{item?.title}</strong>{error && <p className="error">{error}</p>}</div></main>; }
+
+  // Clean up HLS instance on unmount or when switching media.
+  useEffect(() => () => { hlsRef.current?.destroy(); hlsRef.current = null; }, []);
+
+  return <main className="player-page"><button className="player-back" onClick={() => navigate(-1)}>← 返回</button>
+    <video ref={setVideo} controls autoPlay playsInline
+      src={`/api/media/${id}/file?token=${getToken()}`}
+      onLoadedMetadata={(e) => { if (item?.position) e.currentTarget.currentTime = item.position; const p = e.currentTarget.play(); if (p && typeof p.then === "function") p.catch(() => setNeedsTap(true)); }}
+      onWaiting={() => setBuffering(true)}
+      onPlaying={() => setBuffering(false)}
+      onTimeUpdate={(e) => save(e.currentTarget)}
+      onPause={(e) => save(e.currentTarget)}
+      onEnded={(e) => save(e.currentTarget, true)}
+      onError={transcode}
+    />
+    {buffering && !error && <div className="player-spinner" aria-label="缓冲中">⏳</div>}
+    {needsTap && <button className="player-tap" type="button" onClick={() => { video?.play().then(() => setNeedsTap(false)).catch(() => {}); }}>▶ 点击播放</button>}
+    <div className="player-title"><span>正在播放</span><strong>{item?.title}</strong>{error && <p className="error">{error}</p>}</div>
+  </main>;
+}
 
 const emptySourceForm = { name: "", type: "webdav", basePath: "", username: "", password: "" };
 
@@ -416,7 +537,7 @@ function SourceAdmin({ jobs, refreshJobs }: { jobs: ScanJob[]; refreshJobs: (job
       <button className="primary" onClick={openCreate}>＋ 添加媒体源</button>
     </header>
 
-    {message && <div className="admin-toast">{message}<button type="button" onClick={() => setMessage("")}>×</button></div>}
+    {message && <div className="admin-toast">{message}<button type="button" aria-label="关闭" onClick={() => setMessage("")}>×</button></div>}
 
     <section className="admin-stats">
       <article className="stat-card">
@@ -458,7 +579,7 @@ function SourceAdmin({ jobs, refreshJobs }: { jobs: ScanJob[]; refreshJobs: (job
             <span className="eyebrow">DOUBAN</span>
             <h2>设置豆瓣 Cookie</h2>
           </div>
-          <button type="button" className="icon-close" onClick={() => setShowDouban(false)}>×</button>
+          <button type="button" className="icon-close" aria-label="关闭" onClick={() => setShowDouban(false)}>×</button>
         </div>
         <p className="drawer-desc">浏览器登录 movie.douban.com 后，复制 Cookie 粘贴到这里并保存。保存后可点「检测登录」验证。</p>
         <label>豆瓣 Cookie<textarea rows={6} value={doubanForm.cookies} onChange={(e) => setDoubanForm({ ...doubanForm, cookies: e.target.value })} placeholder='bid=xxx; dbcl2="xxx"; ck=xxx; ...' required /></label>
@@ -515,7 +636,7 @@ function SourceAdmin({ jobs, refreshJobs }: { jobs: ScanJob[]; refreshJobs: (job
             <span className="eyebrow">{editingId ? "EDIT SOURCE" : "NEW SOURCE"}</span>
             <h2>{editingId ? "编辑媒体源" : "添加媒体源"}</h2>
           </div>
-          <button type="button" className="icon-close" onClick={closeForm}>×</button>
+          <button type="button" className="icon-close" aria-label="关闭" onClick={closeForm}>×</button>
         </div>
         <p className="drawer-desc">{editingId ? "留空密码将保留原凭证。修改后建议重新测试并扫描。" : "凭证会加密保存在 NAS 数据目录中。"}</p>
         <label>显示名称<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="例如：家庭影院" required /></label>
@@ -534,4 +655,19 @@ function SourceAdmin({ jobs, refreshJobs }: { jobs: ScanJob[]; refreshJobs: (job
   </main>;
 }
 
-export default function App() { const [initialized, setInitialized] = useState<boolean>(); const [user, setUser] = useState<User>(); useEffect(() => { api<{ initialized: boolean }>("/setup").then((result) => setInitialized(result.initialized)); if (getToken()) api<{ user: User }>("/me").then((result) => setUser(result.user)).catch(clearToken); }, []); if (initialized === undefined) return <div className="splash">F</div>; if (!user) return <Auth initialized={initialized} onLogin={setUser} />; return <Layout user={user} logout={() => { clearToken(); setUser(undefined); }} />; }
+export default function App() {
+  const [initialized, setInitialized] = useState<boolean>();
+  const [user, setUser] = useState<User>();
+  useEffect(() => {
+    setOnUnauthorized(() => setUser(undefined));
+    // Wait for both /setup and /me (if a token exists) before rendering, so a
+    // logged-in user never flashes the Auth page during startup.
+    const setupP = api<{ initialized: boolean }>("/setup").then((r) => r.initialized).catch(() => false);
+    const meP = getToken() ? api<{ user: User }>("/me").then((r) => r.user).catch(() => { clearToken(); return undefined; }) : Promise.resolve(undefined);
+    Promise.all([setupP, meP]).then(([init, u]) => { setInitialized(init); setUser(u); });
+    return () => setOnUnauthorized(null);
+  }, []);
+  if (initialized === undefined) return <div className="splash">F</div>;
+  if (!user) return <Auth initialized={initialized} onLogin={setUser} onSetupDone={() => setInitialized(true)} />;
+  return <Layout user={user} logout={() => { clearToken(); setUser(undefined); }} />;
+}

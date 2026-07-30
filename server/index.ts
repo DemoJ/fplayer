@@ -6,9 +6,11 @@ import { spawn } from "node:child_process";
 import express from "express";
 import { db } from "./db.js";
 import { config } from "./config.js";
-import { encrypt, hashPassword, hashToken, newSessionToken, verifyPassword } from "./security.js";
+import { encrypt, hashPassword, hashToken, newSessionToken, signTranscode, verifyPassword, verifyTranscodeSig } from "./security.js";
 import { sourceFile, webdavHeaders } from "./media.js";
+import { activeCount, destroy, ensureDir, fileExists, get, maxConcurrent, noteDisconnect, owns, register } from "./transcodes.js";
 import { startScan, stopScan } from "./scans.js";
+import { rebuildCatalog } from "./catalog.js";
 import { metadataStatus, startMetadataRefresh, stopMetadataRefresh, checkDoubanLogin, refreshWorkMetadata } from "./metadata.js";
 import { getDoubanSettings, saveDoubanSettings } from "./douban.js";
 import type { AuthRequest, Source } from "./types.js";
@@ -25,7 +27,17 @@ function auth(req: AuthRequest, res: express.Response, next: express.NextFunctio
 const admin = (req: AuthRequest, res: express.Response, next: express.NextFunction) => req.user?.role === "admin" ? next() : res.status(403).json({ error: "需要管理员权限" });
 
 app.get("/api/setup", (_req, res) => res.json({ initialized: Boolean(db.prepare("SELECT 1 FROM users LIMIT 1").get()) }));
-app.post("/api/setup", (req, res) => { if (db.prepare("SELECT 1 FROM users LIMIT 1").get()) return res.status(409).json({ error: "已完成初始化" }); const { username, password } = req.body; if (!username || !password || password.length < 8) return res.status(400).json({ error: "用户名不能为空，密码至少 8 位" }); const result = db.prepare("INSERT INTO users(username,password_hash) VALUES(?,?)").run(username, hashPassword(password)); res.json({ user: { id: result.lastInsertRowid, username, role: "admin" } }); });
+app.post("/api/setup", (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password || password.length < 8) return res.status(400).json({ error: "用户名不能为空，密码至少 8 位" });
+  // Atomically guard against concurrent setup creating multiple admins.
+  const result = db.transaction(() => {
+    if (db.prepare("SELECT 1 FROM users LIMIT 1").get()) return null;
+    return db.prepare("INSERT INTO users(username,password_hash) VALUES(?,?)").run(username, hashPassword(password));
+  })();
+  if (!result) return res.status(409).json({ error: "已完成初始化" });
+  res.json({ user: { id: result.lastInsertRowid, username, role: "admin" } });
+});
 app.post("/api/login", (req, res) => { const user = db.prepare("SELECT * FROM users WHERE username=?").get(req.body.username) as any; if (!user || !verifyPassword(req.body.password || "", user.password_hash)) return res.status(401).json({ error: "用户名或密码错误" }); const token = newSessionToken(); db.prepare("INSERT INTO sessions VALUES(?,?,datetime('now','+30 days'))").run(hashToken(token), user.id); res.json({ token, user: publicUser(user) }); });
 app.get("/api/me", auth, (req: AuthRequest, res) => res.json({ user: req.user }));
 app.get("/api/sources", auth, (_req, res) => res.json(db.prepare("SELECT id,name,type,base_path,username,enabled,last_scan_at,last_error FROM sources ORDER BY id DESC").all()));
@@ -219,22 +231,85 @@ async function openMedia(req: AuthRequest, res: express.Response, next: express.
 app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => { const media = (req as any).media as Source & { media_path: string; media_size: number }; const url = sourceFile(media, media.media_path); const range = req.headers.range; const headers: any = { ...webdavHeaders(media) }; if (range) headers.Range = range; const upstream = media.type === "local" ? null : await fetch(url, { headers }); if (media.type === "local") { res.setHeader("Accept-Ranges", "bytes"); res.sendFile(path.resolve(url)); return; } if (!upstream?.ok && upstream?.status !== 206) return res.status(upstream?.status || 502).end(); res.status(upstream.status); ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => { const value = upstream.headers.get(header); if (value) res.setHeader(header, value); }); res.setHeader("Content-Disposition", "inline"); if (upstream.body) for await (const chunk of upstream.body) if (!res.write(chunk)) await new Promise<void>((resolve) => res.once("drain", resolve)); res.end(); });
 app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, res) => {
   const media = (req as any).media as Source & { media_path: string };
+  if (activeCount() >= maxConcurrent()) return res.status(429).json({ error: "转码并发已满，请稍后再试" });
   const session = randomUUID();
-  const outputDir = path.join(config.dataDir, "transcodes", session);
-  await fs.mkdir(outputDir, { recursive: true });
-  const input = sourceFile(media, media.media_path);
-  const authHeader = media.type === "webdav" && media.username ? `Authorization: ${webdavHeaders(media).Authorization}\r\n` : "";
-  const args = [...(authHeader ? ["-headers", authHeader] : []), "-i", input, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-c:a", "aac", "-b:a", "192k", "-f", "hls", "-hls_time", "6", "-hls_list_size", "0", "-hls_segment_filename", path.join(outputDir, "segment-%05d.ts"), path.join(outputDir, "index.m3u8")];
-  const child = spawn(config.ffmpeg, args, { stdio: ["ignore", "ignore", "pipe"] });
+  const outputDir = await ensureDir(session);
+  const segFile = path.join(outputDir, "segment-%05d.ts");
+  const playlistFile = path.join(outputDir, "index.m3u8");
+  // Streaming HLS: keep a sliding window of segments, never finalize the playlist,
+  // so large files start playing after the first segment instead of timing out.
+  const args = ["-i", "pipe:0", "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-c:a", "aac", "-b:a", "192k", "-f", "hls", "-hls_time", "4", "-hls_list_size", "6", "-hls_flags", "delete_segments+independent_segments+omit_endlist", "-hls_segment_filename", segFile, playlistFile];
+  const child = spawn(config.ffmpeg, args, { stdio: ["pipe", "ignore", "pipe"] });
   let ffmpegError = ""; child.stderr.on("data", (chunk) => { ffmpegError = (ffmpegError + chunk).slice(-4000); });
-  child.on("close", (code) => { if (code && !fsSync.existsSync(path.join(outputDir, "index.m3u8"))) fs.writeFile(path.join(outputDir, "error.txt"), ffmpegError).catch(() => {}); });
-  for (let attempt = 0; attempt < 150; attempt++) {
-    if (fsSync.existsSync(path.join(outputDir, "index.m3u8"))) return res.json({ session, playlist: `/api/transcode/${session}/index.m3u8` });
-    if (fsSync.existsSync(path.join(outputDir, "error.txt"))) return res.status(500).json({ error: "FFmpeg 转码启动失败" });
+  // Feed input. For WebDAV the credentials stay in the fetch header, never on the
+  // ffmpeg command line. For local files, stream the file into stdin too so the
+  // code path is uniform and credentials are never exposed via ps.
+  const inputAbort = new AbortController();
+  let inputStream: ReadableStream<Uint8Array> | null = null;
+  if (media.type === "webdav") {
+    const upstream = await fetch(sourceFile(media, media.media_path), { headers: webdavHeaders(media), signal: inputAbort.signal });
+    if (!upstream.ok && upstream.status !== 206) { child.kill("SIGKILL"); inputAbort.abort(); return res.status(upstream.status || 502).json({ error: "无法读取媒体文件" }); }
+    inputStream = upstream.body;
+  } else {
+    inputStream = fsSync.createReadStream(sourceFile(media, media.media_path)) as unknown as ReadableStream<Uint8Array>;
+  }
+  register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream, inputAbort });
+  // Pipe input into ffmpeg stdin with backpressure handling.
+  const nodeStream = inputStream as any;
+  if (nodeStream && typeof nodeStream.pipe === "function") {
+    nodeStream.pipe(child.stdin, { end: true });
+    nodeStream.on("error", () => { try { child.stdin.end(); } catch {} });
+  } else if (nodeStream) {
+    (async () => { try { for await (const chunk of nodeStream as ReadableStream<Uint8Array>) { if (!child.stdin.write(chunk)) await new Promise<void>((r) => child.stdin.once("drain", r)); } child.stdin.end(); } catch { try { child.stdin.destroy(); } catch {} } })();
+  }
+  child.stdin.on("error", () => {});
+  child.on("close", (code) => { if (code && !fileExists(playlistFile)) fs.writeFile(path.join(outputDir, "error.txt"), ffmpegError).catch(() => {}); });
+  // Stop feeding the ffmpeg if the client disconnects during start-up; the reaper
+  // will reclaim the session after a grace period so brief seek pauses survive.
+  const onClientClose = () => noteDisconnect(session);
+  res.on("close", onClientClose);
+  for (let attempt = 0; attempt < 300; attempt++) { // 30s start-up window
+    if (fileExists(playlistFile)) {
+      res.off("close", onClientClose);
+      return res.json({ session, playlist: `/api/transcode/${session}/index.m3u8` });
+    }
+    if (fileExists(path.join(outputDir, "error.txt"))) { destroy(session); return res.status(500).json({ error: "FFmpeg 转码启动失败" }); }
+    if (child.exitCode !== null || child.killed) { destroy(session); return res.status(500).json({ error: "FFmpeg 意外退出" }); }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  child.kill("SIGTERM"); res.status(504).json({ error: "转码启动超时" });
+  destroy(session);
+  res.status(504).json({ error: "转码启动超时" });
 });
-app.get("/api/transcode/:session/:file", auth, async (req, res) => { const file = path.basename(String(req.params.file)); const full = path.join(config.dataDir, "transcodes", String(req.params.session), file); try { await fs.access(full); if (file.endsWith(".m3u8") && typeof req.query.token === "string") { const playlist = await fs.readFile(full, "utf8"); return res.type("application/vnd.apple.mpegurl").send(playlist.replace(/^(segment-.*\.ts)$/gm, `$1?token=${encodeURIComponent(req.query.token)}`)); } res.type(path.extname(file)); res.sendFile(full); } catch { res.status(404).end(); } });
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+app.get("/api/transcode/:session/:file", auth, async (req: AuthRequest, res) => {
+  const session = String(req.params.session);
+  if (!UUID_RE.test(session)) return res.status(400).json({ error: "无效的转码会话" });
+  const file = path.basename(String(req.params.file));
+  if (!file || file === "." || file === "..") return res.status(400).end();
+  // Authorize: either the owner of the session, or a valid short-lived signature.
+  const ownerOk = owns(session, req.user!.id);
+  const sig = typeof req.query.sig === "string" ? req.query.sig : undefined;
+  const sigOk = sig ? verifyTranscodeSig(session, file, sig) : false;
+  if (!ownerOk && !sigOk) return res.status(403).end();
+  get(session); // refresh lastAccess
+  const full = path.join(config.dataDir, "transcodes", session, file);
+  try {
+    await fs.access(full);
+    if (file.endsWith(".m3u8")) {
+      // Rewrite segment URLs to carry a short-lived signature instead of the main
+      // session token, so the token never lands in playlist/segment URLs or logs.
+      const playlist = await fs.readFile(full, "utf8");
+      const rewritten = playlist.replace(/^(segment-.*\.ts)$/gm, (_, seg) => `${seg}?sig=${signTranscode(session, seg)}`);
+      return res.type("application/vnd.apple.mpegurl").send(rewritten);
+    }
+    res.type(path.extname(file));
+    res.sendFile(full);
+  } catch {
+    // Segment not ready yet (streaming HLS): ask the client to retry shortly.
+    if (file.endsWith(".ts")) return res.status(503).set("Retry-After", "1").end();
+    res.status(404).end();
+  }
+});
 app.get(/^(?!\/api).*/, (_req, res) => res.sendFile(path.resolve("dist/index.html")));
+rebuildCatalog();
 app.listen(config.port, () => console.log(`FPlayer listening on :${config.port}`));

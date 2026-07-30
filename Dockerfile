@@ -7,7 +7,14 @@ RUN sed -i "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}/debian|g; s|http://d
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --registry=${NPM_REGISTRY}
+# Speed up native module install in CN:
+#  - better-sqlite3 prebuild binary mirror (avoids slow GitHub Releases)
+#  - node headers mirror (avoids slow nodejs.org when node-gyp builds from source)
+#  - skip audit/fund to remove extra registry requests
+ENV npm_config_better_sqlite3_binary_host_mirror=https://npmmirror.com/mirrors/better-sqlite3
+ENV npm_config_node_mirror=https://npmmirror.com/mirrors/node
+ENV NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node
+RUN npm install --registry=${NPM_REGISTRY} --no-audit --no-fund
 COPY . .
 RUN npm run build && npm prune --omit=dev
 
