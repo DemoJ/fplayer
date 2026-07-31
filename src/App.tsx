@@ -18,18 +18,26 @@ function Auth({ initialized, onLogin, onSetupDone }: { initialized: boolean; onL
 
 function Layout({ user, logout }: { user: User; logout: () => void }) {
   const location = useLocation(); const [jobs, setJobs] = useState<ScanJob[]>([]);
+  const cinema = location.pathname.startsWith("/watch/");
   useEffect(() => {
     let active = true; let timer = 0;
     const refresh = () => api<ScanJob[]>("/scans").then((rows) => { if (active) setJobs(rows); }).catch(() => {});
     refresh();
     // Poll only while there are active jobs; stop the interval once idle.
-    const hasActive = () => jobs.some((job) => ["queued", "running"].includes(job.status));
-    if (hasActive()) timer = window.setInterval(refresh, 1500);
+    // Check current state from a ref to avoid retriggering this effect on every
+    // setJobs, which would cause an infinite request loop.
+    timer = window.setInterval(() => {
+      setJobs((current) => {
+        const hasActive = current.some((job) => ["queued", "running"].includes(job.status));
+        if (hasActive) refresh();
+        return current;
+      });
+    }, 2000);
     return () => { active = false; if (timer) window.clearInterval(timer); };
-  }, [jobs]);
+  }, []);
   async function dismiss(job: ScanJob) { await api(`/scans/${job.id}/acknowledge`, { method: "POST" }); setJobs((current) => current.filter((item) => item.id !== job.id)); }
   const finished = jobs.filter((job) => ["completed", "failed", "cancelled"].includes(job.status));
-  return <div className="shell"><aside><Link className="logo" to="/"><span>F</span> FPLAYER</Link><nav><Link className={location.pathname === "/" ? "active" : ""} to="/" aria-label="首页">⌂ <span>首页</span></Link><Link className={location.pathname.startsWith("/movies") ? "active" : ""} to="/movies" aria-label="电影">◫ <span>电影</span></Link><Link className={location.pathname.startsWith("/shows") ? "active" : ""} to="/shows" aria-label="剧集">▤ <span>剧集</span></Link><Link className={location.pathname.startsWith("/admin") ? "active" : ""} to="/admin" aria-label="媒体源">⚙ <span>媒体源</span></Link></nav><div className="account"><div className="avatar">{user.username[0].toUpperCase()}</div><div><strong>{user.username}</strong><button onClick={logout}>退出登录</button></div></div></aside><div className="content"><Routes><Route path="/" element={<Home />} /><Route path="/movies" element={<Library kind="movie" />} /><Route path="/shows" element={<Library kind="show" />} /><Route path="/browse" element={<BrowseView />} /><Route path="/browse/:sourceId" element={<BrowseView />} /><Route path="/work/:id" element={<WorkDetail />} /><Route path="/media/:id" element={<Detail />} /><Route path="/watch/:id" element={<Player />} /><Route path="/admin" element={<SourceAdmin jobs={jobs} refreshJobs={(rows) => setJobs(rows)} />} /></Routes></div>{finished.length > 0 && <div className="notifications">{finished.map((job) => <article className={`toast ${job.status}`} key={job.id}><div><strong>{job.source_name}：{job.status === "completed" ? "扫描完成" : job.status === "cancelled" ? "扫描已停止" : "扫描失败"}</strong><p>{job.status === "completed" ? `共发现并更新 ${job.result_count || 0} 个媒体文件` : job.error}</p></div><button aria-label="关闭" onClick={() => dismiss(job)}>×</button></article>)}</div>}</div>;
+  return <div className={`shell ${cinema ? "cinema" : ""}`}><aside><Link className="logo" to="/"><span>F</span> FPLAYER</Link><nav><Link className={location.pathname === "/" ? "active" : ""} to="/" aria-label="首页">⌂ <span>首页</span></Link><Link className={location.pathname.startsWith("/movies") ? "active" : ""} to="/movies" aria-label="电影">◫ <span>电影</span></Link><Link className={location.pathname.startsWith("/shows") ? "active" : ""} to="/shows" aria-label="剧集">▤ <span>剧集</span></Link><Link className={location.pathname.startsWith("/admin") ? "active" : ""} to="/admin" aria-label="媒体源">⚙ <span>媒体源</span></Link></nav><div className="account"><div className="avatar">{user.username[0].toUpperCase()}</div><div><strong>{user.username}</strong><button onClick={logout}>退出登录</button></div></div></aside><div className="content"><Routes><Route path="/" element={<Home />} /><Route path="/movies" element={<Library kind="movie" />} /><Route path="/shows" element={<Library kind="show" />} /><Route path="/browse" element={<BrowseView />} /><Route path="/browse/:sourceId" element={<BrowseView />} /><Route path="/work/:id" element={<WorkDetail />} /><Route path="/media/:id" element={<Detail />} /><Route path="/watch/:id" element={<Player />} /><Route path="/admin" element={<SourceAdmin jobs={jobs} refreshJobs={(rows) => setJobs(rows)} />} /></Routes></div>{finished.length > 0 && <div className="notifications">{finished.map((job) => <article className={`toast ${job.status}`} key={job.id}><div><strong>{job.source_name}：{job.status === "completed" ? "扫描完成" : job.status === "cancelled" ? "扫描已停止" : "扫描失败"}</strong><p>{job.status === "completed" ? `共发现并更新 ${job.result_count || 0} 个媒体文件` : job.error}</p></div><button aria-label="关闭" onClick={() => dismiss(job)}>×</button></article>)}</div>}</div>;
 }
 
 // Loads a protected poster/artwork as a blob URL so the auth token stays in the
@@ -259,29 +267,36 @@ function WorkDetail() {
   const [message, setMessage] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [selectedMediaId, setSelectedMediaId] = useState<number>();
   const load = () => api<{ work: Work; media: Media[] }>(`/works/${id}`).then((d) => { setData(d); setLoadError(""); }).catch((e) => setLoadError((e as Error).message));
   useEffect(() => { setData(undefined); setLoadError(""); void load(); }, [id]);
   async function refreshMetadata() {
     if (!id || refreshing) return;
-    setRefreshing(true); setMessage("正在重新刮削...");
-    try { await api(`/works/${id}/metadata/refresh`, { method: "POST" }); await load(); setMessage("刮削完成"); }
+    setRefreshing(true); setMessage("");
+    try { await api(`/works/${id}/metadata/refresh`, { method: "POST" }); await load(); setMessage("已更新"); }
     catch (error) { setMessage((error as Error).message); }
     finally { setRefreshing(false); }
   }
   if (loadError) return <div className="empty"><strong>载入失败</strong><p>{loadError}</p><button className="text-link" type="button" onClick={() => void load()}>重试</button></div>;
   if (!data) return <div className="empty">载入作品...</div>;
   const seasons = [...new Set(data.media.map((item) => item.season).filter(Boolean))] as number[];
-  return <main className="work-detail"><div className="work-detail-top"><LibraryBack kind={data.work.kind} /></div><PosterBg path={data.work.poster_path} className="detail-art"><b>{data.work.poster_path ? "" : data.work.title.slice(0, 1)}</b></PosterBg><section><span className="eyebrow">{data.work.kind === "show" ? "剧集" : "电影"} · {data.work.year || "未匹配年份"}</span><h1>{data.work.title}</h1><div className="work-actions"><button className="ghost accent" onClick={refreshMetadata} disabled={refreshing}>{refreshing ? "刮削中..." : "重新刮削"}</button>{message && <small>{message}</small>}</div><p className="description">{data.work.overview || "尚未匹配简介。可点击“重新刮削”，用豆瓣补齐中文简介和海报。"}</p>{data.work.kind === "show" ? <div className="episodes">{seasons.map((season) => { const episodes = Object.values(data.media.filter((item) => item.season === season).reduce<Record<string, Media>>((map, item) => { const key = String(item.episode); if (!map[key] || (item.size || 0) > (map[key].size || 0)) map[key] = item; return map; }, {})).sort((a, b) => (a.episode || 0) - (b.episode || 0)); return <div key={season}><h3>第 {season} 季 · {episodes.length} 集</h3>{episodes.map((item) => <Link className="episode" to={`/watch/${item.id}`} key={item.id}><span>S{String(item.season).padStart(2, "0")}E{String(item.episode).padStart(2, "0")}</span><b>第 {item.episode} 集</b><small>{item.size ? `${Math.round(item.size / 1024 / 1024)} MB` : ""}</small></Link>)}</div>; })}</div> : <Link className={`primary play ${data.media.length === 0 ? "disabled" : ""}`} to={data.media.length ? `/watch/${data.media[0].id}` : "#"} onClick={(e) => { if (!data.media.length) e.preventDefault(); }}>▶ 开始播放</Link>}</section></main>;
+  const selectedMedia = data.media.find((item) => item.id === selectedMediaId) || data.media.find((item) => item.position && !item.completed) || data.media[0];
+  const hasMetadata = Boolean(data.work.poster_path && data.work.overview);
+  const formatMedia = (item: Media) => [item.container?.toUpperCase() || "VIDEO", item.video_codec?.toUpperCase(), item.duration ? `${Math.round(item.duration / 60)} 分钟` : undefined, item.size ? `${Math.round(item.size / 1024 / 1024)} MB` : undefined].filter(Boolean).join(" · ");
+  return <main className="work-detail"><div className="work-detail-top"><LibraryBack kind={data.work.kind} /></div><PosterBg path={data.work.poster_path} className="detail-art"><b>{data.work.poster_path ? "" : data.work.title.slice(0, 1)}</b></PosterBg><section><span className="eyebrow">{data.work.kind === "show" ? "剧集" : "电影"} · {data.work.year || "未匹配年份"}</span><h1>{data.work.title}</h1>{data.work.kind === "movie" && <><p className="meta">{selectedMedia ? formatMedia(selectedMedia) : "暂无可播放文件"}</p><Link className={`primary play work-play ${selectedMedia ? "" : "disabled"}`} to={selectedMedia ? `/watch/${selectedMedia.id}` : "#"} onClick={(e) => { if (!selectedMedia) e.preventDefault(); }}>▶ {selectedMedia?.position && !selectedMedia.completed ? "继续播放" : "开始播放"}</Link></>}<div className={`work-overview ${hasMetadata ? "" : "missing"}`}><p className="description">{data.work.overview || "影片资料尚未匹配完整，匹配后可补齐中文简介和海报。"}</p><div className="metadata-context"><span>{hasMetadata ? "资料由豆瓣匹配" : "缺少影片资料"}</span><button type="button" onClick={refreshMetadata} disabled={refreshing}>{refreshing ? "正在匹配..." : hasMetadata ? "重新匹配" : "匹配影片资料"}</button>{message && <small className={message === "已更新" ? "success" : "error"}>{message}</small>}</div></div>{data.work.kind === "show" ? <div className="episodes">{seasons.map((season) => { const episodes = Object.values(data.media.filter((item) => item.season === season).reduce<Record<string, Media>>((map, item) => { const key = String(item.episode); if (!map[key] || (item.size || 0) > (map[key].size || 0)) map[key] = item; return map; }, {})).sort((a, b) => (a.episode || 0) - (b.episode || 0)); return <div key={season}><h3>第 {season} 季 · {episodes.length} 集</h3>{episodes.map((item) => <Link className="episode" to={`/watch/${item.id}`} key={item.id}><span>S{String(item.season).padStart(2, "0")}E{String(item.episode || 0).padStart(2, "0")}</span><b>第 {item.episode} 集{item.position && !item.completed ? " · 继续" : ""}</b><small>{item.size ? `${Math.round(item.size / 1024 / 1024)} MB` : ""}</small></Link>)}</div>; })}</div> : data.media.length > 1 && <div className="versions"><h3>选择版本</h3>{data.media.map((item, index) => <button type="button" className={item.id === selectedMedia?.id ? "active" : ""} onClick={() => setSelectedMediaId(item.id)} key={item.id}><span><b>版本 {index + 1}</b><small>{item.path.split("/").pop()}</small></span><em>{formatMedia(item)}</em></button>)}</div>}</section></main>;
 }
 
 function Player() {
   const { id } = useParams(); const navigate = useNavigate();
   const [item, setItem] = useState<Media>(); const [error, setError] = useState("");
   const [buffering, setBuffering] = useState(false);
+  const [status, setStatus] = useState("");
   const [needsTap, setNeedsTap] = useState(false);
+  const [chromeVisible, setChromeVisible] = useState(true);
   const [video, setVideo] = useState<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const lastSavedRef = useRef(0);
+  const chromeTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     let active = true;
     api<Media>(`/media/${id}`).then((m) => { if (active) setItem(m); }).catch((e) => { if (active) setError((e as Error).message); });
@@ -292,9 +307,10 @@ function Player() {
     if (!video || video.dataset.transcoding) return;
     // Only fall back to transcoding for format/decode issues, not transient errors.
     const code = video.error?.code;
-    if (code === MediaError.MEDIA_ERR_NETWORK) { setError("网络错误，请稍后重试"); return; }
+    if (code === MediaError.MEDIA_ERR_NETWORK) { setError("网络错误，请检查连接后重试"); setBuffering(false); return; }
     video.dataset.transcoding = "true";
-    setError("原格式不兼容，正在启动 FFmpeg 转码...");
+    setError("");
+    setStatus("原格式不兼容，正在启动转码...");
     setBuffering(true);
     try {
       const result = await api<{ playlist: string }>(`/media/${id}/transcode`, { method: "POST" });
@@ -307,15 +323,17 @@ function Player() {
         const hls = new Hls({ xhrSetup: (xhr) => xhr.setRequestHeader("Authorization", `Bearer ${getToken()}`), fragLoadingMaxRetry: 6, fragLoadingRetryDelay: 800 });
         hlsRef.current = hls;
         hls.loadSource(source); hls.attachMedia(video);
-        hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) setError("转码播放失败，请重试"); });
+        hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) { setError("转码播放失败，请重试"); setBuffering(false); setStatus(""); } });
       } else {
         // Native HLS (e.g. iOS): no custom headers possible, rely on the signed
         // segment URLs rewritten by the server into the playlist.
         video.src = source;
       }
       setError("");
+      setStatus("");
     } catch (e) {
       setError((e as Error).message);
+      setStatus("");
       if (video) video.dataset.transcoding = "";
     } finally { setBuffering(false); }
   }
@@ -381,22 +399,54 @@ function Player() {
   }, [video]);
 
   // Clean up HLS instance on unmount or when switching media.
-  useEffect(() => () => { hlsRef.current?.destroy(); hlsRef.current = null; }, []);
+  useEffect(() => () => { hlsRef.current?.destroy(); hlsRef.current = null; if (chromeTimerRef.current) window.clearTimeout(chromeTimerRef.current); }, []);
 
-  return <main className="player-page"><button className="player-back" onClick={() => navigate(-1)}>← 返回</button>
+  // When entering fullscreen via the native video control, blur the video so
+  // keyboard focus leaves the shadow DOM. This lets arrow keys reach our window
+  // seek handler and prevents a focus ring on the fullscreen button.
+  useEffect(() => {
+    if (!video) return;
+    const onFsChange = () => { if (document.fullscreenElement) { (document.activeElement as HTMLElement | null)?.blur(); window.focus(); } };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, [video]);
+
+  function showChrome() {
+    setChromeVisible(true);
+    if (chromeTimerRef.current) window.clearTimeout(chromeTimerRef.current);
+    chromeTimerRef.current = window.setTimeout(() => { if (video && !video.paused) setChromeVisible(false); }, 2600);
+  }
+
+  function goBack() {
+    if (item?.work_id) navigate(`/work/${item.work_id}`, { replace: true });
+    else navigate(item?.kind === "show" ? "/shows" : "/movies", { replace: true });
+  }
+
+  function retry() {
+    if (!video) return;
+    hlsRef.current?.destroy(); hlsRef.current = null;
+    video.dataset.transcoding = "";
+    setError(""); setStatus(""); setNeedsTap(false); setBuffering(true);
+    video.src = `/api/media/${id}/file?token=${getToken()}`;
+    video.load();
+    video.play().catch(() => setNeedsTap(true));
+  }
+
+  return <main className={`player-page ${chromeVisible ? "chrome-visible" : ""}`} onMouseMove={showChrome} onPointerDown={showChrome}>
+    <div className="player-chrome"><button className="player-back" onClick={goBack} aria-label="返回详情"><span>‹</span></button><div className="player-heading"><small>正在播放</small><strong>{item?.title}</strong></div></div>
     <video ref={setVideo} controls autoPlay playsInline
       src={`/api/media/${id}/file?token=${getToken()}`}
       onLoadedMetadata={(e) => { if (item?.position) e.currentTarget.currentTime = item.position; const p = e.currentTarget.play(); if (p && typeof p.then === "function") p.catch(() => setNeedsTap(true)); }}
       onWaiting={() => setBuffering(true)}
-      onPlaying={() => setBuffering(false)}
+      onPlaying={() => { setBuffering(false); setStatus(""); showChrome(); }}
+      onPause={() => { if (video) save(video); setChromeVisible(true); }}
       onTimeUpdate={(e) => save(e.currentTarget)}
-      onPause={(e) => save(e.currentTarget)}
       onEnded={(e) => save(e.currentTarget, true)}
       onError={transcode}
     />
-    {buffering && !error && <div className="player-spinner" aria-label="缓冲中">⏳</div>}
+    {buffering && !error && <div className="player-status" role="status"><i className="player-spinner" /><strong>{status || "正在缓冲"}</strong></div>}
     {needsTap && <button className="player-tap" type="button" onClick={() => { video?.play().then(() => setNeedsTap(false)).catch(() => {}); }}>▶ 点击播放</button>}
-    <div className="player-title"><span>正在播放</span><strong>{item?.title}</strong>{error && <p className="error">{error}</p>}</div>
+    {error && <div className="player-error" role="alert"><span>播放遇到问题</span><strong>{error}</strong><div><button type="button" className="primary" onClick={retry}>重试</button><button type="button" className="secondary" onClick={goBack}>返回详情</button></div></div>}
   </main>;
 }
 

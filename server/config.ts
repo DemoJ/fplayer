@@ -6,4 +6,5 @@ export const config = {
   appSecret: process.env.APP_SECRET || "",
   ffmpeg: process.env.FFMPEG_PATH || "ffmpeg",
   ffprobe: process.env.FFPROBE_PATH || "ffprobe",
+  transcodeAcceleration: process.env.TRANSCODE_ACCELERATION || "auto",
 };

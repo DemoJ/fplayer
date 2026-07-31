@@ -11,8 +11,6 @@
 }
 .work-detail section h1 { font: 900 clamp(2.8rem, 5vw, 6rem)/1 "Noto Serif SC"; margin: 14px 0 20px; }
 .work-detail-top { grid-column: 1 / -1; display: flex; align-items: center; min-height: 24px; }
-.work-actions { display: flex; align-items: center; gap: 12px; margin: 18px 0; }
-.work-actions small { color: #8a8a86; }
 .work-card { position: relative; min-width: 0; }
 .media-card { position: relative; min-width: 0; }
 .media-more { position: absolute; right: 8px; top: 8px; z-index: 3; width: 30px; height: 30px; border: 1px solid #ffffff40; border-radius: 50%; background: #090b0dcc; color: #fff; font-size: 1.2rem; line-height: 1; cursor: pointer; backdrop-filter: blur(8px); }
@@ -92,4 +90,60 @@
   .view-switch a { flex: 1; text-align: center; }
   .folder-row { grid-template-columns: 40px 1fr; }
   .folder-row small { grid-column: 2; white-space: normal; }
+}
+
+.work-detail {
+  grid-template-columns: minmax(240px, 360px) minmax(0, 1fr);
+  column-gap: clamp(36px, 6vw, 88px);
+  max-width: 1280px;
+  margin: 0 auto;
+}
+.work-detail .detail-art { width: 100%; max-width: 360px; align-self: start; }
+.work-detail > section { min-width: 0; padding-top: clamp(8px, 3vh, 42px); }
+.work-detail section h1 { margin-bottom: 14px; }
+.work-detail .meta { margin: 0 0 20px; color: #aaa9a3; line-height: 1.6; }
+.work-play { margin: 0 0 24px; min-width: 150px; text-align: center; }
+.work-overview { max-width: 580px; margin-bottom: 26px; }
+.work-overview .description { margin: 0; }
+.metadata-context { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 11px; color: #5f605e; font-size: .68rem; }
+.metadata-context span:after { content: "·"; margin-left: 7px; color: #444; }
+.metadata-context button { border: 0; background: transparent; color: #8c8c87; padding: 0; cursor: pointer; font: inherit; text-decoration: underline; text-decoration-color: #555; text-underline-offset: 3px; }
+.metadata-context button:hover { color: var(--orange); text-decoration-color: var(--orange); }
+.metadata-context button:disabled { color: #666; cursor: wait; text-decoration: none; }
+.metadata-context small { color: #8a8a86; }
+.metadata-context small.success { color: #819a78; }
+.metadata-context small.error { color: #d17b69; }
+.work-overview.missing { border-left: 2px solid #5a3b2c; padding: 12px 0 12px 16px; }
+.work-overview.missing .description { color: #aaa7a0; }
+.work-overview.missing .metadata-context { margin-top: 8px; }
+.work-overview.missing .metadata-context span { color: #a6816c; }
+.work-overview.missing .metadata-context button { color: #ef9a72; font-weight: 700; text-decoration: none; }
+.versions { margin-top: 30px; }
+.versions h3 { margin: 0 0 10px; color: #aaa; font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; }
+.versions button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; border: 1px solid transparent; border-top-color: #292c2e; background: transparent; color: #ddd; padding: 13px 10px; text-align: left; cursor: pointer; }
+.versions button:hover { background: #15181a; }
+.versions button.active { border-color: #563927; background: #1b1512; }
+.versions button span { min-width: 0; }
+.versions button b, .versions button small { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.versions button b { font-size: .82rem; }
+.versions button small { margin-top: 4px; color: #666; font-size: .68rem; }
+.versions button em { color: #918f89; font-size: .7rem; font-style: normal; white-space: nowrap; }
+
+@media (max-width: 1199px) {
+  .work-detail { grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); column-gap: clamp(28px, 5vw, 56px); }
+  .work-detail section h1 { font-size: clamp(2.5rem, 5vw, 4.8rem); }
+}
+
+@media (max-width: 700px) {
+  .work-detail { grid-template-columns: 1fr; padding-top: 20px !important; row-gap: 20px; }
+  .work-detail .detail-art { width: min(58vw, 210px); max-width: 100%; margin: 0 auto; }
+  .work-detail > section { padding-top: 4px; }
+  .work-detail section h1 { font-size: clamp(2.25rem, 12vw, 3.5rem); margin: 10px 0 12px; }
+  .work-play { display: block; width: 100%; margin-bottom: 22px; }
+  .work-detail .description { margin-bottom: 20px; }
+  .episodes { max-height: none; overflow: visible; padding-right: 0; margin-top: 24px; }
+  .versions { margin-top: 24px; }
+  .versions button { grid-template-columns: 1fr; gap: 7px; }
+  .versions button em { white-space: normal; }
+  .work-overview { margin-bottom: 20px; }
 }

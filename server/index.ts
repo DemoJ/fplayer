@@ -13,6 +13,7 @@ import { startScan, stopScan } from "./scans.js";
 import { rebuildCatalog } from "./catalog.js";
 import { metadataStatus, startMetadataRefresh, stopMetadataRefresh, checkDoubanLogin, refreshWorkMetadata } from "./metadata.js";
 import { getDoubanSettings, saveDoubanSettings } from "./douban.js";
+import { getTranscodeAcceleration, transcodeArgs } from "./ffmpeg.js";
 import type { AuthRequest, Source } from "./types.js";
 
 const app = express(); app.use(express.json());
@@ -228,7 +229,9 @@ app.delete("/api/media/:id", auth, admin, async (req, res) => {
 });
 app.put("/api/media/:id/progress", auth, (req: AuthRequest, res) => { const { position = 0, duration = 0, completed = false } = req.body; db.prepare("INSERT INTO progress(user_id,media_id,position,duration,completed) VALUES(?,?,?,?,?) ON CONFLICT(user_id,media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,completed=excluded.completed,updated_at=CURRENT_TIMESTAMP").run(req.user!.id, req.params.id, position, duration, completed ? 1 : 0); res.json({ ok: true }); });
 async function openMedia(req: AuthRequest, res: express.Response, next: express.NextFunction) { const media = db.prepare("SELECT m.path media_path,m.size media_size,s.* FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(req.params.id) as any; if (!media) return res.status(404).end(); (req as any).media = media; next(); }
-app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => { const media = (req as any).media as Source & { media_path: string; media_size: number }; const url = sourceFile(media, media.media_path); const range = req.headers.range; const headers: any = { ...webdavHeaders(media) }; if (range) headers.Range = range; const upstream = media.type === "local" ? null : await fetch(url, { headers }); if (media.type === "local") { res.setHeader("Accept-Ranges", "bytes"); res.sendFile(path.resolve(url)); return; } if (!upstream?.ok && upstream?.status !== 206) return res.status(upstream?.status || 502).end(); res.status(upstream.status); ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => { const value = upstream.headers.get(header); if (value) res.setHeader(header, value); }); res.setHeader("Content-Disposition", "inline"); if (upstream.body) for await (const chunk of upstream.body) if (!res.write(chunk)) await new Promise<void>((resolve) => res.once("drain", resolve)); res.end(); });
+app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => { const media = (req as any).media as Source & { media_path: string; media_size: number }; const url = sourceFile(media, media.media_path); const range = req.headers.range; const headers: any = { ...webdavHeaders(media) }; if (range) headers.Range = range; const upstream = media.type === "local" ? null : await fetch(url, { headers }); if (media.type === "local") { res.setHeader("Accept-Ranges", "bytes"); res.sendFile(path.resolve(url)); return; } if (!upstream?.ok && upstream?.status !== 206) { if (upstream?.status === 416 || upstream?.status === 429) { const body = await upstream.text().catch(() => ""); if (upstream.status === 429 || body.includes("429") || body.toLowerCase().includes("too many")) return res.status(429).json({ error: "网盘请求过于频繁，请稍后重试" }); } return res.status(upstream?.status || 502).json({ error: "无法读取媒体文件" }); } res.status(upstream.status); ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => { const value = upstream.headers.get(header); if (value) res.setHeader(header, value); }); res.setHeader("Content-Disposition", "inline"); // Close the upstream connection when the client disconnects so we don't
+  // keep downloading from the WebDAV source after the browser stops reading.
+  const onClose = () => { try { upstream.body?.cancel(); } catch {} }; res.on("close", onClose); if (upstream.body) for await (const chunk of upstream.body) { if (!res.write(chunk)) await new Promise<void>((resolve) => res.once("drain", resolve)); } res.end(); });
 app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, res) => {
   const media = (req as any).media as Source & { media_path: string };
   if (activeCount() >= maxConcurrent()) return res.status(429).json({ error: "转码并发已满，请稍后再试" });
@@ -238,31 +241,45 @@ app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, r
   const playlistFile = path.join(outputDir, "index.m3u8");
   // Streaming HLS: keep a sliding window of segments, never finalize the playlist,
   // so large files start playing after the first segment instead of timing out.
-  const args = ["-i", "pipe:0", "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-c:a", "aac", "-b:a", "192k", "-f", "hls", "-hls_time", "4", "-hls_list_size", "6", "-hls_flags", "delete_segments+independent_segments+omit_endlist", "-hls_segment_filename", segFile, playlistFile];
-  const child = spawn(config.ffmpeg, args, { stdio: ["pipe", "ignore", "pipe"] });
-  let ffmpegError = ""; child.stderr.on("data", (chunk) => { ffmpegError = (ffmpegError + chunk).slice(-4000); });
-  // Feed input. For WebDAV the credentials stay in the fetch header, never on the
-  // ffmpeg command line. For local files, stream the file into stdin too so the
-  // code path is uniform and credentials are never exposed via ps.
+  const acceleration = await getTranscodeAcceleration();
+  // For WebDAV sources, let ffmpeg read the HTTP URL directly instead of piping
+  // through Node.js. This avoids a redundant full-file download (the /file
+  // endpoint may also be requested by the browser) and lets ffmpeg seek via
+  // HTTP Range, which is far more efficient and avoids triggering upstream
+  // rate limits from double-fetching large files.
+  let ffmpegInput: string | undefined;
+  let localStream: ReadableStream<Uint8Array> | null = null;
   const inputAbort = new AbortController();
-  let inputStream: ReadableStream<Uint8Array> | null = null;
   if (media.type === "webdav") {
-    const upstream = await fetch(sourceFile(media, media.media_path), { headers: webdavHeaders(media), signal: inputAbort.signal });
-    if (!upstream.ok && upstream.status !== 206) { child.kill("SIGKILL"); inputAbort.abort(); return res.status(upstream.status || 502).json({ error: "无法读取媒体文件" }); }
-    inputStream = upstream.body;
+    const url = sourceFile(media, media.media_path);
+    const authHeader = webdavHeaders(media);
+    // Build a URL with embedded credentials so ffmpeg can read it directly
+    // without exposing the Basic auth header on the command line via -headers.
+    if (authHeader.Authorization) {
+      const basic = authHeader.Authorization.replace("Basic ", "");
+      const decoded = Buffer.from(basic, "base64").toString("utf8");
+      const u = new URL(url);
+      u.username = encodeURIComponent(decoded.split(":")[0]);
+      u.password = encodeURIComponent(decoded.slice(decoded.indexOf(":") + 1));
+      ffmpegInput = u.toString();
+    } else {
+      ffmpegInput = url;
+    }
   } else {
-    inputStream = fsSync.createReadStream(sourceFile(media, media.media_path)) as unknown as ReadableStream<Uint8Array>;
+    localStream = fsSync.createReadStream(sourceFile(media, media.media_path)) as unknown as ReadableStream<Uint8Array>;
   }
-  register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream, inputAbort });
-  // Pipe input into ffmpeg stdin with backpressure handling.
-  const nodeStream = inputStream as any;
-  if (nodeStream && typeof nodeStream.pipe === "function") {
+  const args = transcodeArgs(acceleration, segFile, playlistFile, ffmpegInput);
+  const child = spawn(config.ffmpeg, args, { stdio: ffmpegInput ? ["ignore", "ignore", "pipe"] : ["pipe", "ignore", "pipe"] });
+  let ffmpegError = ""; child.stderr?.on("data", (chunk) => { ffmpegError = (ffmpegError + chunk).slice(-4000); });
+  if (localStream) {
+    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: localStream, inputAbort });
+    const nodeStream = localStream as any;
     nodeStream.pipe(child.stdin, { end: true });
-    nodeStream.on("error", () => { try { child.stdin.end(); } catch {} });
-  } else if (nodeStream) {
-    (async () => { try { for await (const chunk of nodeStream as ReadableStream<Uint8Array>) { if (!child.stdin.write(chunk)) await new Promise<void>((r) => child.stdin.once("drain", r)); } child.stdin.end(); } catch { try { child.stdin.destroy(); } catch {} } })();
+    nodeStream.on("error", () => { try { child.stdin?.end(); } catch {} });
+    child.stdin?.on("error", () => {});
+  } else {
+    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: null, inputAbort });
   }
-  child.stdin.on("error", () => {});
   child.on("close", (code) => { if (code && !fileExists(playlistFile)) fs.writeFile(path.join(outputDir, "error.txt"), ffmpegError).catch(() => {}); });
   // Stop feeding the ffmpeg if the client disconnects during start-up; the reaper
   // will reclaim the session after a grace period so brief seek pauses survive.

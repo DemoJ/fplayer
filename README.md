@@ -14,7 +14,7 @@
 - 播放进度和继续观看
 - Docker 单容器部署
 
-浏览器会优先直接播放兼容格式；无法直接播放时自动启动 FFmpeg，转为 H.264 + AAC 的 HLS 流。
+浏览器会优先直接播放兼容格式；无法直接播放时自动启动 FFmpeg，转为 H.264 + AAC 的 HLS 流。有 NVIDIA GPU 时默认自动启用 NVDEC/NVENC，无 GPU 或硬件编码不可用时回落到 CPU。
 
 ## 本地开发
 
@@ -34,6 +34,8 @@ npm run dev
 ```bash
 docker compose up -d --build
 ```
+
+GPU 转码需要宿主机安装 NVIDIA 驱动与 NVIDIA Container Toolkit。可通过 `TRANSCODE_ACCELERATION=cpu` 强制关闭硬件加速；默认 `auto` 会在容器启动后首次转码时检测 GPU。
 
 4. 打开 `http://NAS-IP:3000`，创建管理员。
 5. 添加 WebDAV 地址或容器内本地目录，点击“测试”和“扫描”。
