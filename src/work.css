@@ -27,7 +27,12 @@
 .work-file-row strong { color: #eee; font-size: .8rem; }
 .work-file-row small { color: #777; font-size: .68rem; max-width: 230px; margin-top: 4px; }
 .work-file-row > div:last-child { display: flex; gap: 6px; flex-shrink: 0; }
-.episodes { margin-top: 35px; max-height: 55vh; overflow: auto; padding-right: 8px; }
+.episodes { margin-top: 35px; max-height: 55vh; overflow: auto; padding-right: 8px; scrollbar-width: thin; scrollbar-color: #3a3e42 transparent; }
+.episodes::-webkit-scrollbar { width: 6px; }
+.episodes::-webkit-scrollbar-track { background: transparent; }
+.episodes::-webkit-scrollbar-thumb { background: #3a3e42; border-radius: 3px; }
+.episodes::-webkit-scrollbar-thumb:hover { background: var(--orange); }
+.episodes::-webkit-scrollbar-corner { background: transparent; }
 .episodes h3 { color: var(--orange); font-size: .8rem; letter-spacing: .12em; margin: 25px 0 8px; }
 .episode { display: grid; grid-template-columns: 80px 1fr auto; align-items: center; gap: 12px; border-top: 1px solid #292c2e; padding: 13px 4px; }
 .episode span { color: var(--orange); font-size: .75rem; }
