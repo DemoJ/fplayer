@@ -5,6 +5,9 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # ⚠️ 该 APP_SECRET 是作者自用密钥，已随公开仓库公开，任何人拿到即可解密你保存的
+      # WebDAV 账号密码。他人部署时务必替换为随机密钥：openssl rand -hex 32
+      # （替换后需重新填写已保存的 WebDAV 密码。）
       APP_SECRET: c699a24b5bd628fb002cd2e1bc74bd1fae771f2bd5257c20e344ecfe6c9a3f5a
       DATA_DIR: /data
       TRANSCODE_ACCELERATION: auto
@@ -13,6 +16,8 @@ services:
     gpus: all
     volumes:
       - ./data:/data
+      # 容器现以非 root 用户(uid 1000)运行。若 data/ 目录是老版本(root 所有)产生的，
+      # 首次升级需执行一次：sudo chown -R 1000:1000 data
       # 需要读取 NAS 本地媒体目录时，取消注释并把左侧改成实际路径
       # - /volume1/video:/media:ro
     healthcheck:

@@ -7,7 +7,7 @@ import express from "express";
 import { db } from "./db.js";
 import { config } from "./config.js";
 import { encrypt, hashPassword, hashToken, newSessionToken, signTranscode, verifyPassword, verifyTranscodeSig } from "./security.js";
-import { mediaInputUrl, probe, sourceFile, webdavHeaders } from "./media.js";
+import { mediaInputUrl, probe, sourceFile, startCredentialProxy, webdavHeaders, withCredentialProxy } from "./media.js";
 import { activeCount, destroy, ensureDir, fileExists, get, maxConcurrent, owns, register, sweepStaleDirectories } from "./transcodes.js";
 import { startScan, stopScan } from "./scans.js";
 import { rebuildCatalog } from "./catalog.js";
@@ -18,17 +18,66 @@ import type { AuthRequest, Source } from "./types.js";
 
 const app = express(); app.use(express.json());
 app.use(express.static(path.resolve("dist")));
+// Baseline hardening headers. Referrer-Policy: no-referrer stops the session
+// token from leaking to third parties through the Referer header.
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  next();
+});
 const publicUser = (user: any) => ({ id: user.id, username: user.username, role: user.role });
+// Only the media stream endpoint may be reached with the token in the query
+// string (a <video> element cannot set an Authorization header). Every other
+// API refuses query tokens so a leaked URL token can only pull media files,
+// never manage sources, metadata or settings.
+const QUERY_TOKEN_PATHS = [/^\/api\/media\/\d+\/file$/];
 function auth(req: AuthRequest, res: express.Response, next: express.NextFunction) {
-  const token = req.headers.authorization?.replace("Bearer ", "") || (typeof req.query.token === "string" ? req.query.token : undefined);
+  const header = req.headers.authorization?.replace("Bearer ", "");
+  const query = typeof req.query.token === "string" ? req.query.token : undefined;
+  const token = header || (query && QUERY_TOKEN_PATHS.some((re) => re.test(req.path)) ? query : undefined);
   if (!token) return res.status(401).json({ error: "请先登录" });
   const session = db.prepare("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>CURRENT_TIMESTAMP").get(hashToken(token)) as any;
   if (!session) return res.status(401).json({ error: "登录已过期" }); req.user = publicUser(session); next();
 }
 const admin = (req: AuthRequest, res: express.Response, next: express.NextFunction) => req.user?.role === "admin" ? next() : res.status(403).json({ error: "需要管理员权限" });
+// Setup window: the admin account may only be created shortly after server
+// start, before any user is claimed. Prevents account-claim hijacking on an
+// exposed-but-uninitialized instance.
+const setupWindowExpiresAt = Date.now() + config.setupWindowMs;
+const setupAvailable = () => Date.now() <= setupWindowExpiresAt;
+// Brute-force guard for login. In-memory, per IP+username: after 5 failed
+// attempts the combination is locked for 15 minutes. Correct credentials are
+// also rejected while locked so an attacker can't probe the real password.
+const loginFailures = new Map<string, { count: number; lockedUntil: number }>();
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+function loginLockKey(req: express.Request, username: string) {
+  return `${req.ip || "unknown"}:${username}`;
+}
+function loginLocked(key: string) {
+  const entry = loginFailures.get(key);
+  return Boolean(entry && entry.lockedUntil > Date.now());
+}
+function recordLoginFailure(key: string) {
+  const entry = loginFailures.get(key) || { count: 0, lockedUntil: 0 };
+  if (entry.count + 1 >= LOGIN_MAX_FAILURES) {
+    entry.count = 0;
+    entry.lockedUntil = Date.now() + LOGIN_LOCK_MS;
+  } else {
+    entry.count += 1;
+  }
+  loginFailures.set(key, entry);
+}
 
-app.get("/api/setup", (_req, res) => res.json({ initialized: Boolean(db.prepare("SELECT 1 FROM users LIMIT 1").get()) }));
+app.get("/api/setup", (_req, res) => {
+  const initialized = Boolean(db.prepare("SELECT 1 FROM users LIMIT 1").get());
+  // Expose the window so the client can disable the setup form once expired.
+  res.json({ initialized, setupExpired: !initialized && !setupAvailable() });
+});
 app.post("/api/setup", (req, res) => {
+  // Prevent account-claim hijacking: on an uninitialized instance exposed to
+  // the internet, anyone could otherwise register themselves as admin first.
+  if (!setupAvailable()) return res.status(403).json({ error: `初始化窗口已过期：请在服务启动后 ${Math.round(config.setupWindowMs / 60000)} 分钟内创建管理员。如需重新初始化，请删除数据目录后重启服务。` });
   const { username, password } = req.body;
   if (!username || !password || password.length < 8) return res.status(400).json({ error: "用户名不能为空，密码至少 8 位" });
   // Atomically guard against concurrent setup creating multiple admins.
@@ -39,13 +88,32 @@ app.post("/api/setup", (req, res) => {
   if (!result) return res.status(409).json({ error: "已完成初始化" });
   res.json({ user: { id: result.lastInsertRowid, username, role: "admin" } });
 });
-app.post("/api/login", (req, res) => { const user = db.prepare("SELECT * FROM users WHERE username=?").get(req.body.username) as any; if (!user || !verifyPassword(req.body.password || "", user.password_hash)) return res.status(401).json({ error: "用户名或密码错误" }); const token = newSessionToken(); db.prepare("INSERT INTO sessions VALUES(?,?,datetime('now','+30 days'))").run(hashToken(token), user.id); res.json({ token, user: publicUser(user) }); });
+app.post("/api/login", (req, res) => {
+  const username = String(req.body?.username || "");
+  const key = loginLockKey(req, username);
+  if (loginLocked(key)) return res.status(429).json({ error: "失败次数过多，请 15 分钟后再试" });
+  const user = db.prepare("SELECT * FROM users WHERE username=?").get(username) as any;
+  if (!user || !verifyPassword(req.body?.password || "", user.password_hash)) {
+    recordLoginFailure(key);
+    return res.status(401).json({ error: "用户名或密码错误" });
+  }
+  loginFailures.delete(key);
+  const token = newSessionToken();
+  db.prepare("INSERT INTO sessions VALUES(?,?,datetime('now','+30 days'))").run(hashToken(token), user.id);
+  res.json({ token, user: publicUser(user) });
+});
+app.post("/api/logout", auth, (req: AuthRequest, res) => {
+  // Revoke the session server-side so a leaked token can't be reused.
+  const token = req.headers.authorization?.replace("Bearer ", "") || (typeof req.query.token === "string" ? req.query.token : "");
+  if (token) db.prepare("DELETE FROM sessions WHERE token_hash=?").run(hashToken(token));
+  res.json({ ok: true });
+});
 app.get("/api/me", auth, (req: AuthRequest, res) => res.json({ user: req.user }));
 app.get("/api/sources", auth, (_req, res) => res.json(db.prepare("SELECT id,name,type,base_path,username,enabled,last_scan_at,last_error FROM sources ORDER BY id DESC").all()));
 app.post("/api/sources", auth, admin, (req, res) => { const { name, type, basePath, username, password } = req.body; if (!name || !basePath || !["local", "webdav"].includes(type)) return res.status(400).json({ error: "媒体源参数不完整" }); const result = db.prepare("INSERT INTO sources(name,type,base_path,username,secret) VALUES(?,?,?,?,?)").run(name, type, basePath, username || null, password ? encrypt(password) : null); res.json({ id: result.lastInsertRowid }); });
 app.put("/api/sources/:id", auth, admin, (req, res) => { const { name, type, basePath, username, password } = req.body; if (!name || !basePath || !["local", "webdav"].includes(type)) return res.status(400).json({ error: "媒体源参数不完整" }); const existing = db.prepare("SELECT * FROM sources WHERE id=?").get(req.params.id) as Source | undefined; if (!existing) return res.status(404).json({ error: "媒体源不存在" }); const secret = type === "local" ? null : password ? encrypt(password) : existing.secret; db.prepare("UPDATE sources SET name=?,type=?,base_path=?,username=?,secret=?,last_error=NULL WHERE id=?").run(name, type, basePath, type === "webdav" ? username || null : null, secret, req.params.id); res.json({ ok: true }); });
 app.delete("/api/sources/:id", auth, admin, (req, res) => { const result = db.prepare("DELETE FROM sources WHERE id=?").run(req.params.id); if (!result.changes) return res.status(404).json({ error: "媒体源不存在" }); res.json({ ok: true }); });
-app.post("/api/sources/:id/test", auth, admin, async (req, res) => { try { const source = db.prepare("SELECT * FROM sources WHERE id=?").get(req.params.id) as Source; if (source.type === "local") await fs.access(source.base_path); else { const response = await fetch(source.base_path, { method: "PROPFIND", headers: { Depth: "0", ...webdavHeaders(source) } }); if (!response.ok) throw new Error(`WebDAV 返回 ${response.status}`); } res.json({ ok: true }); } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : "连接失败" }); } });
+app.post("/api/sources/:id/test", auth, admin, async (req, res) => { try { const source = db.prepare("SELECT * FROM sources WHERE id=?").get(req.params.id) as Source; if (source.type === "local") await fs.access(source.base_path); else { const response = await fetch(source.base_path, { method: "PROPFIND", headers: { Depth: "0", ...webdavHeaders(source) }, signal: AbortSignal.timeout(10_000) }); if (!response.ok) throw new Error(`WebDAV 返回 ${response.status}`); } res.json({ ok: true }); } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : "连接失败" }); } });
 app.get("/api/scans", auth, (_req, res) => { const jobs = db.prepare("SELECT j.*,s.name source_name FROM scan_jobs j JOIN sources s ON s.id=j.source_id WHERE j.acknowledged=0 ORDER BY j.id DESC").all(); res.json(jobs); });
 app.post("/api/sources/:id/scan", auth, admin, (req, res) => { const source = db.prepare("SELECT id FROM sources WHERE id=?").get(req.params.id); if (!source) return res.status(404).json({ error: "媒体源不存在" }); res.status(202).json(startScan(Number(req.params.id))); });
 app.post("/api/scans/:id/stop", auth, admin, (req, res) => stopScan(Number(req.params.id)) ? res.json({ ok: true }) : res.status(409).json({ error: "扫描任务不在运行中" }));
@@ -76,13 +144,13 @@ app.post("/api/works/:id/metadata/refresh", auth, admin, async (req, res) => {
   }
 });
 app.get("/api/posters/:file", auth, (req, res) => res.sendFile(path.join(config.dataDir, "posters", path.basename(String(req.params.file)))));
-app.get("/api/media", auth, (req: AuthRequest, res) => { const q = String(req.query.q || ""); const kind = String(req.query.kind || ""); const rows = db.prepare(`SELECT m.*, p.position, p.duration AS progress_duration, p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.available=1 AND m.title LIKE ? AND (?='' OR m.kind=?) ORDER BY m.title COLLATE NOCASE`).all(req.user!.id, `%${q}%`, kind, kind); res.json(rows); });
+app.get("/api/media", auth, (req: AuthRequest, res) => { const q = String(req.query.q || ""); const kind = String(req.query.kind || ""); const rows = db.prepare(`SELECT m.*, p.position, p.duration AS progress_duration, p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.available=1 AND m.trashed=0 AND m.title LIKE ? AND (?='' OR m.kind=?) ORDER BY m.title COLLATE NOCASE`).all(req.user!.id, `%${q}%`, kind, kind); res.json(rows); });
 app.get("/api/continue", auth, (req: AuthRequest, res) => {
   const limit = Math.min(24, Math.max(1, Number(req.query.limit) || 12));
   const rows = db.prepare(`
     SELECT m.*, p.position, p.duration AS progress_duration, p.completed, p.updated_at AS last_watched_at, s.name AS source_name, w.poster_path AS work_poster
     FROM progress p
-    JOIN media m ON m.id = p.media_id AND m.available = 1
+    JOIN media m ON m.id = p.media_id AND m.available=1 AND m.trashed=0
     JOIN sources s ON s.id = m.source_id
     LEFT JOIN works w ON w.id = m.work_id
     WHERE p.user_id = ? AND p.completed = 0 AND p.position > 5
@@ -109,7 +177,7 @@ app.get("/api/up-next", auth, (req: AuthRequest, res) => {
     pairs AS (
       SELECT m.work_id, m.season AS s, m.episode AS e
       FROM media m
-      WHERE m.available = 1 AND m.season IS NOT NULL AND m.episode IS NOT NULL
+      WHERE m.available=1 AND m.trashed=0 AND m.season IS NOT NULL AND m.episode IS NOT NULL
       GROUP BY m.work_id, m.season, m.episode
     ),
     next_pair AS (
@@ -123,7 +191,7 @@ app.get("/api/up-next", auth, (req: AuthRequest, res) => {
       SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.work_id, m.season, m.episode ORDER BY m.size DESC, m.id) AS rn
       FROM media m
       JOIN np ON np.work_id = m.work_id AND np.ns = m.season AND np.ne = m.episode
-      WHERE m.available = 1
+      WHERE m.available=1 AND m.trashed=0
     )
     SELECT t.id, t.title, t.kind, t.season, t.episode, t.duration, t.size, t.container, t.work_id,
            w.title AS work_title, w.poster_path AS work_poster, s.name AS source_name,
@@ -147,7 +215,7 @@ app.get("/api/recent", auth, (req: AuthRequest, res) => {
     JOIN sources s ON s.id = m.source_id
     LEFT JOIN progress p ON p.media_id = m.id AND p.user_id = ?
     LEFT JOIN works w ON w.id = m.work_id
-    WHERE m.available = 1
+    WHERE m.available=1 AND m.trashed=0
     ORDER BY m.id DESC
     LIMIT ?
   `).all(req.user!.id, limit);
@@ -175,7 +243,7 @@ app.get("/api/browse", auth, (req: AuthRequest, res) => {
     const sources = db.prepare(`
       SELECT s.id, s.name, s.type, s.base_path, COUNT(m.id) AS file_count
       FROM sources s
-      LEFT JOIN media m ON m.source_id = s.id AND m.available = 1
+      LEFT JOIN media m ON m.source_id = s.id AND m.available=1 AND m.trashed=0
       GROUP BY s.id
       ORDER BY s.name COLLATE NOCASE
     `).all();
@@ -194,7 +262,7 @@ app.get("/api/browse", auth, (req: AuthRequest, res) => {
            p.position, p.duration AS progress_duration, p.completed
     FROM media m
     LEFT JOIN progress p ON p.media_id = m.id AND p.user_id = ?
-    WHERE m.source_id = ? AND m.available = 1
+    WHERE m.source_id = ? AND m.available=1 AND m.trashed=0
     ORDER BY m.path COLLATE NOCASE
   `).all(req.user!.id, sourceId) as Array<any>;
   const folderMap = new Map<string, number>();
@@ -225,9 +293,17 @@ app.get("/api/browse", auth, (req: AuthRequest, res) => {
   res.json({ level: "folder", source, path: relative, root, crumbs, sources: [], folders, files });
 });
 
-app.get("/api/works", auth, (req: AuthRequest, res) => { const q = String(req.query.q || ""); const kind = String(req.query.kind || ""); const rows = db.prepare(`SELECT w.*,COUNT(DISTINCT m.id) AS file_count,COUNT(DISTINCT CASE WHEN m.season IS NOT NULL THEN m.season END) AS season_count,MAX(p.updated_at) AS last_watched_at FROM works w LEFT JOIN media m ON m.work_id=w.id AND m.available=1 LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE w.title LIKE ? AND (?='' OR w.kind=?) GROUP BY w.id ORDER BY w.title COLLATE NOCASE`).all(req.user!.id, `%${q}%`, kind, kind); res.json(rows); });
-app.get("/api/works/:id", auth, (req, res) => { const work = db.prepare("SELECT * FROM works WHERE id=?").get(req.params.id); if (!work) return res.status(404).json({ error: "作品不存在" }); const media = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.work_id=? AND m.available=1 ORDER BY m.season,m.episode,m.size DESC").all((req as AuthRequest).user!.id, req.params.id); res.json({ work, media }); });
-app.get("/api/media/:id", auth, (req: AuthRequest, res) => { const row = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=?").get(req.user!.id, req.params.id); row ? res.json(row) : res.status(404).json({ error: "媒体不存在" }); });
+app.get("/api/works", auth, (req: AuthRequest, res) => {
+  const q = String(req.query.q || "");
+  const kind = String(req.query.kind || "");
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 60));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const totalRow = db.prepare("SELECT COUNT(*) AS count FROM works WHERE title LIKE ? AND (?='' OR kind=?)").get(`%${q}%`, kind, kind) as { count: number };
+  const rows = db.prepare(`SELECT w.*,COUNT(DISTINCT m.id) AS file_count,COUNT(DISTINCT CASE WHEN m.season IS NOT NULL THEN m.season END) AS season_count,MAX(p.updated_at) AS last_watched_at FROM works w LEFT JOIN media m ON m.work_id=w.id AND m.available=1 AND m.trashed=0 LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE w.title LIKE ? AND (?='' OR w.kind=?) GROUP BY w.id ORDER BY w.title COLLATE NOCASE LIMIT ? OFFSET ?`).all(req.user!.id, `%${q}%`, kind, kind, limit, offset);
+  res.json({ items: rows, total: totalRow.count });
+});
+app.get("/api/works/:id", auth, (req, res) => { const work = db.prepare("SELECT * FROM works WHERE id=?").get(req.params.id); if (!work) return res.status(404).json({ error: "作品不存在" }); const media = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.work_id=? AND m.available=1 AND m.trashed=0 ORDER BY m.season,m.episode,m.size DESC").all((req as AuthRequest).user!.id, req.params.id); res.json({ work, media }); });
+app.get("/api/media/:id", auth, (req: AuthRequest, res) => { const row = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=? AND m.trashed=0").get(req.user!.id, req.params.id); row ? res.json(row) : res.status(404).json({ error: "媒体不存在" }); });
 // Probes a media file (ffprobe reading the source directly) and caches the
 // codec info in the media row. The player uses this to decide whether the
 // browser can play the file natively or whether it must go through
@@ -235,14 +311,16 @@ app.get("/api/media/:id", auth, (req: AuthRequest, res) => { const row = db.prep
 app.post("/api/media/:id/probe", auth, openMedia, async (req: AuthRequest, res) => {
   const media = (req as any).media as Source & { media_path: string };
   try {
-    const info = await probe(mediaInputUrl(media, media.media_path));
+    const info = await withCredentialProxy(media, media.media_path, (url) => probe(url));
     const video = (info.streams || []).find((stream: any) => stream.codec_type === "video");
     const audio = (info.streams || []).find((stream: any) => stream.codec_type === "audio");
-    db.prepare("UPDATE media SET duration=?,container=?,video_codec=?,audio_codec=? WHERE id=?").run(
+    const subtitle = (info.streams || []).find((stream: any) => stream.codec_type === "subtitle");
+    db.prepare("UPDATE media SET duration=?,container=?,video_codec=?,audio_codec=?,subtitle_codec=? WHERE id=?").run(
       Number(info.format?.duration) || null,
       String(info.format?.format_name || "").split(",")[0] || null,
       video?.codec_name || null,
       audio?.codec_name || null,
+      subtitle?.codec_name || null,
       media.id,
     );
     const updated = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=?").get(req.user!.id, media.id);
@@ -252,7 +330,7 @@ app.post("/api/media/:id/probe", auth, openMedia, async (req: AuthRequest, res) 
   }
 });
 app.put("/api/media/:id", auth, admin, async (req, res) => {
-  const media = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(req.params.id) as any;
+  const media = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1 AND m.trashed=0").get(req.params.id) as any;
   if (!media) return res.status(404).json({ error: "媒体不存在" });
   const requestedName = typeof req.body?.name === "string" ? req.body.name.trim() : path.basename(media.path);
   const name = path.basename(requestedName);
@@ -281,39 +359,112 @@ app.put("/api/media/:id", auth, admin, async (req, res) => {
     res.status(400).json({ error: error instanceof Error ? error.message : "修改文件失败" });
   }
 });
-app.delete("/api/media/:id", auth, admin, async (req, res) => {
-  const media = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(req.params.id) as any;
-  if (!media) return res.status(404).json({ error: "媒体不存在" });
+app.delete("/api/media/:id", auth, admin, (_req, res) => {
+  // Soft delete: the file stays on disk and the entry moves to the trash bin.
+  // Undo (restore) or permanent deletion (trash/empty) are available in admin.
+  const result = db.prepare("UPDATE media SET trashed=1,trashed_at=CURRENT_TIMESTAMP WHERE id=? AND available=1").run(_req.params.id);
+  if (!result.changes) return res.status(404).json({ error: "媒体不存在" });
+  res.json({ ok: true });
+});
+app.post("/api/media/:id/restore", auth, admin, (req, res) => {
+  const result = db.prepare("UPDATE media SET trashed=0,trashed_at=NULL WHERE id=?").run(req.params.id);
+  if (!result.changes) return res.status(404).json({ error: "媒体不存在" });
+  res.json({ ok: true });
+});
+app.get("/api/trash", auth, admin, (_req, res) => {
+  const rows = db.prepare(`
+    SELECT m.id, m.title, m.path, m.size, m.season, m.episode, m.kind, s.name AS source_name
+    FROM media m JOIN sources s ON s.id=m.source_id
+    WHERE m.trashed=1 ORDER BY m.id DESC
+  `).all();
+  res.json(rows);
+});
+app.post("/api/trash/empty", auth, admin, async (_req, res) => {
+  // Permanently delete the underlying files of trashed entries. Entries whose
+  // file could not be removed (source unreachable, permissions...) are kept so
+  // the user can retry; a file that is already gone counts as removed.
+  const rows = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.trashed=1").all() as any[];
+  let removed = 0;
+  for (const media of rows) {
+    try {
+      if (media.type === "local") {
+        await fs.unlink(path.join(media.base_path, media.path)).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        });
+      } else {
+        const source = { type: media.type, base_path: media.base_path, username: media.username, secret: media.secret } as Source;
+        const response = await fetch(sourceFile(source, media.path), { method: "DELETE", headers: webdavHeaders(source) });
+        if (!response.ok && response.status !== 404) throw new Error(`WebDAV 删除失败 (${response.status})`);
+      }
+    } catch {
+      continue; // keep the entry for a retry
+    }
+    db.prepare("DELETE FROM media WHERE id=?").run(media.id);
+    removed++;
+  }
+  res.json({ ok: true, removed });
+});
+app.delete("/api/trash/:id", auth, admin, async (req, res) => {
+  // Permanently delete a single trashed entry.
+  const media = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.trashed=1").get(req.params.id) as any;
+  if (!media) return res.status(404).json({ error: "回收站条目不存在" });
   try {
     if (media.type === "local") {
-      await fs.unlink(path.join(media.base_path, media.path));
+      await fs.unlink(path.join(media.base_path, media.path)).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      });
     } else {
       const source = { type: media.type, base_path: media.base_path, username: media.username, secret: media.secret } as Source;
       const response = await fetch(sourceFile(source, media.path), { method: "DELETE", headers: webdavHeaders(source) });
       if (!response.ok && response.status !== 404) throw new Error(`WebDAV 删除失败 (${response.status})`);
     }
-    db.prepare("DELETE FROM media WHERE id=?").run(media.id);
-    res.json({ ok: true });
   } catch (error) {
-    res.status(400).json({ error: error instanceof Error ? error.message : "删除文件失败" });
+    return res.status(400).json({ error: error instanceof Error ? error.message : "删除失败" });
   }
+  db.prepare("DELETE FROM media WHERE id=?").run(media.id);
+  res.json({ ok: true });
 });
+// Trash entries older than the retention window are purged automatically at
+// startup and once a day, so a forgotten trash bin cannot fill the disk.
+const TRASH_RETENTION_DAYS = 30;
+async function purgeExpiredTrash() {
+  const rows = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.trashed=1 AND m.trashed_at IS NOT NULL AND m.trashed_at < datetime('now',?)").all(`-${TRASH_RETENTION_DAYS} days`) as any[];
+  for (const media of rows) {
+    try {
+      if (media.type === "local") {
+        await fs.unlink(path.join(media.base_path, media.path)).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        });
+      } else {
+        const source = { type: media.type, base_path: media.base_path, username: media.username, secret: media.secret } as Source;
+        const response = await fetch(sourceFile(source, media.path), { method: "DELETE", headers: webdavHeaders(source) });
+        if (!response.ok && response.status !== 404) throw new Error(`WebDAV 删除失败 (${response.status})`);
+      }
+    } catch {
+      continue;
+    }
+    db.prepare("DELETE FROM media WHERE id=?").run(media.id);
+  }
+}
 app.put("/api/media/:id/progress", auth, (req: AuthRequest, res) => {
   const position = Math.max(0, Number(req.body?.position) || 0);
   const duration = Math.max(0, Number(req.body?.duration) || 0);
   const requestedCompleted = Boolean(req.body?.completed);
-  // Server-side completion guard: only when the position is essentially at the
-  // very end (last 15s). The client is the source of truth for completion —
-  // it knows whether the end was reached by watching or by a drag/seek — so
-  // the loose "last 90s or 5%" fallback would re-mark dragged positions done.
-  const nearEnd = duration > 0 && position >= duration - 15;
+  // The client is the source of truth for completion — it knows whether the
+  // end was reached by watching or by a drag/seek. So when the client sends an
+  // explicit verdict, honor it. The "position at the very end" heuristic only
+  // applies to callers that do not declare completed (e.g. a plain progress
+  // beacon), so dragging the timeline to the final seconds is never
+  // re-marked as finished against the client's intent.
+  const explicit = typeof req.body?.completed === "boolean";
+  const nearEnd = !explicit && duration > 0 && position >= duration - 15;
   const completed = requestedCompleted || nearEnd ? 1 : 0;
   db.prepare("INSERT INTO progress(user_id,media_id,position,duration,completed) VALUES(?,?,?,?,?) ON CONFLICT(user_id,media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,completed=excluded.completed,updated_at=CURRENT_TIMESTAMP").run(req.user!.id, req.params.id, position, duration, completed); res.json({ ok: true });
 });
 async function openMedia(req: AuthRequest, res: express.Response, next: express.NextFunction) {
   // Select source fields explicitly: `s.*` would overwrite m.id with the
   // source id, breaking every downstream use of media.id.
-  const media = db.prepare("SELECT m.id, m.path media_path, m.size media_size, m.source_id, s.type, s.base_path, s.username, s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(req.params.id) as any;
+  const media = db.prepare("SELECT m.id, m.path media_path, m.size media_size, m.source_id, m.subtitle_codec, s.type, s.base_path, s.username, s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1 AND m.trashed=0").get(req.params.id) as any;
   if (!media) return res.status(404).end(); (req as any).media = media; next();
 }
 app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => { const media = (req as any).media as Source & { media_path: string; media_size: number }; const url = sourceFile(media, media.media_path); const range = req.headers.range; const headers: any = { ...webdavHeaders(media) }; if (range) headers.Range = range; const upstream = media.type === "local" ? null : await fetch(url, { headers }); if (media.type === "local") { res.setHeader("Accept-Ranges", "bytes"); res.sendFile(path.resolve(url)); return; } if (!upstream?.ok && upstream?.status !== 206) { if (upstream?.status === 416 || upstream?.status === 429) { const body = await upstream.text().catch(() => ""); if (upstream.status === 429 || body.includes("429") || body.toLowerCase().includes("too many")) return res.status(429).json({ error: "网盘请求过于频繁，请稍后重试" }); } return res.status(upstream?.status || 502).json({ error: "无法读取媒体文件" }); }   res.status(upstream.status); ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => { const value = upstream.headers.get(header); if (value) res.setHeader(header, value); }); res.setHeader("Content-Disposition", "inline"); // Close the upstream connection when the client disconnects so we don't
@@ -333,7 +484,7 @@ app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) =>
   } catch {} // upstream cancelled on client disconnect; ignore.
   res.end(); });
 app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, res) => {
-  const media = (req as any).media as Source & { media_path: string };
+  const media = (req as any).media as Source & { media_path: string; subtitle_codec?: string | null };
   // Resume position: start transcoding from this offset in the source file so
   // a resumed episode becomes playable immediately instead of from the top.
   const start = Math.max(0, Number(req.body?.start) || 0);
@@ -350,26 +501,33 @@ app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, r
   // through Node.js. This avoids a redundant full-file download (the /file
   // endpoint may also be requested by the browser) and lets ffmpeg seek via
   // HTTP Range, which is far more efficient and avoids triggering upstream
-  // rate limits from double-fetching large files.
+  // rate limits from double-fetching large files. Credentials never land on
+  // the command line: a localhost proxy injects the Authorization header.
   let ffmpegInput: string | undefined;
   let localStream: ReadableStream<Uint8Array> | null = null;
+  let credentialProxy: { url: string; close: () => void } | undefined;
   const inputAbort = new AbortController();
   if (media.type === "webdav") {
-    ffmpegInput = mediaInputUrl(media, media.media_path);
+    try {
+      credentialProxy = await startCredentialProxy(media, media.media_path);
+      ffmpegInput = credentialProxy.url;
+    } catch {
+      return res.status(502).json({ error: "无法建立媒体连接" });
+    }
   } else {
     localStream = fsSync.createReadStream(mediaInputUrl(media, media.media_path)) as unknown as ReadableStream<Uint8Array>;
   }
-  const args = transcodeArgs(acceleration, segFile, playlistFile, ffmpegInput, start, quality);
+  const args = transcodeArgs(acceleration, segFile, playlistFile, ffmpegInput, start, quality, media.subtitle_codec);
   const child = spawn(config.ffmpeg, args, { stdio: ffmpegInput ? ["ignore", "ignore", "pipe"] : ["pipe", "ignore", "pipe"] });
   let ffmpegError = ""; child.stderr?.on("data", (chunk) => { ffmpegError = (ffmpegError + chunk).slice(-4000); });
   if (localStream) {
-    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: localStream, inputAbort, exited: false });
+    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: localStream, inputAbort, closeProxy: credentialProxy?.close, exited: false });
     const nodeStream = localStream as any;
     nodeStream.pipe(child.stdin, { end: true });
     nodeStream.on("error", () => { try { child.stdin?.end(); } catch {} });
     child.stdin?.on("error", () => {});
   } else {
-    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: null, inputAbort, exited: false });
+    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: null, inputAbort, closeProxy: credentialProxy?.close, exited: false });
   }
   child.on("close", (code) => {
     if (code && !fileExists(playlistFile)) fs.writeFile(path.join(outputDir, "error.txt"), ffmpegError).catch(() => {});
@@ -401,7 +559,11 @@ app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, r
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       res.off("close", onClientClose);
-      return res.json({ session, playlist: `/api/transcode/${session}/index.m3u8` });
+      // Sign the manifest URL so native HLS players (iOS Safari, which cannot
+      // set an Authorization header) can fetch the playlist too. hls.js also
+      // works with it: the segment URLs are signed server-side either way.
+      const playlist = `/api/transcode/${session}/index.m3u8`;
+      return res.json({ session, playlist: `${playlist}?sig=${signTranscode(session, "index.m3u8")}` });
     }
     if (fileExists(path.join(outputDir, "error.txt"))) { destroy(session); return res.status(500).json({ error: "FFmpeg 转码启动失败" }); }
     if (child.exitCode !== null || child.killed) { destroy(session); return res.status(500).json({ error: "FFmpeg 意外退出" }); }
@@ -460,6 +622,14 @@ app.get("/api/transcode/:session/:file", auth, async (req: AuthRequest, res) => 
   }
 });
 app.get(/^(?!\/api).*/, (_req, res) => res.sendFile(path.resolve("dist/index.html")));
+// A previous instance may have been killed while a scan or metadata job was
+// running. Mark those as interrupted at real startup (kept out of db.ts so
+// importing modules for tests stays side-effect free).
+db.prepare("UPDATE scan_jobs SET status='failed',phase='interrupted',error='服务重启，扫描已中断',finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')").run();
+db.prepare("UPDATE metadata_jobs SET status='failed',phase='interrupted',error='服务重启，匹配已中断',finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')").run();
 rebuildCatalog();
 void sweepStaleDirectories();
+void purgeExpiredTrash();
+const trashPurgeTimer = setInterval(() => void purgeExpiredTrash(), 24 * 60 * 60 * 1000);
+trashPurgeTimer.unref();
 app.listen(config.port, () => console.log(`FPlayer listening on :${config.port}`));

@@ -48,12 +48,28 @@ test("quality selects the scale filter", () => {
   assert.ok(!original.includes("-vf"));
 });
 
-test("keeps all segments so the player never loses its position", () => {
+test("bounded segment window keeps disk usage in check", () => {
   const args = transcodeArgs("nvidia", "segment.ts", "index.m3u8");
   const flags = args.join(" ");
   assert.ok(flags.includes("-hls_list_size"));
+  assert.ok(flags.includes("-hls_list_size 60"));
+  assert.ok(!flags.includes("-hls_list_size 0"));
   assert.ok(!flags.includes("delete_segments"));
-  assert.ok(!flags.includes("hls_list_size 6"));
+});
+
+test("text subtitles are mapped into the HLS stream as WebVTT", () => {
+  const args = transcodeArgs("cpu", "segment.ts", "index.m3u8", undefined, 0, "1080", "srt");
+  assert.ok(args.includes("0:s:0?"));
+  assert.ok(args.includes("webvtt"));
+  assert.ok(args.includes("-c:s"));
+});
+
+test("bitmap subtitles (PGS/DVD) are skipped rather than failing the transcode", () => {
+  const args = transcodeArgs("cpu", "segment.ts", "index.m3u8", undefined, 0, "1080", "hdmv_pgs_subtitle");
+  assert.ok(!args.includes("0:s:0?"));
+  assert.ok(!args.includes("webvtt"));
+  const unknown = transcodeArgs("cpu", "segment.ts", "index.m3u8", undefined, 0, "1080", undefined);
+  assert.ok(!unknown.includes("0:s:0?"));
 });
 
 test("HTTP input with CPU acceleration also reads URL directly", () => {

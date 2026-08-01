@@ -116,8 +116,13 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_scan_jobs_source ON scan_jobs(source_id, id DESC);
 `);
 
-db.prepare("UPDATE scan_jobs SET status='failed',phase='interrupted',error='服务重启，扫描已中断',finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')").run();
-db.prepare("UPDATE metadata_jobs SET status='failed',phase='interrupted',error='服务重启，匹配已中断',finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')").run();
+// Note: the "mark interrupted jobs as failed on restart" cleanup used to live
+// here but ran on every module import, which made `npm test` write to the real
+// database. It now runs in index.ts at real startup instead.
 
 const mediaColumns = db.prepare("PRAGMA table_info(media)").all() as Array<{ name: string }>;
-if (!mediaColumns.some((column) => column.name === "work_id")) db.exec("ALTER TABLE media ADD COLUMN work_id INTEGER REFERENCES works(id) ON DELETE SET NULL");
+const hasColumn = (name: string) => mediaColumns.some((column) => column.name === name);
+if (!hasColumn("work_id")) db.exec("ALTER TABLE media ADD COLUMN work_id INTEGER REFERENCES works(id) ON DELETE SET NULL");
+if (!hasColumn("subtitle_codec")) db.exec("ALTER TABLE media ADD COLUMN subtitle_codec TEXT");
+if (!hasColumn("trashed")) db.exec("ALTER TABLE media ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0");
+if (!hasColumn("trashed_at")) db.exec("ALTER TABLE media ADD COLUMN trashed_at TEXT");

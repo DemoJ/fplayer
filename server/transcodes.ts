@@ -11,6 +11,9 @@ type SessionState = {
   lastAccess: number;
   inputStream?: ReadableStream<Uint8Array> | null;
   inputAbort?: AbortController | null;
+  // Closes the local credential proxy when the session is reclaimed, so the
+  // WebDAV credentials never outlive the ffmpeg process they were created for.
+  closeProxy?: () => void;
   // Set once ffmpeg has exited; the session may still be held for file access
   // until the reaper reclaims it, but it no longer consumes an encoder slot.
   exited: boolean;
@@ -55,6 +58,7 @@ export function owns(session: string, userId: number) {
 function cleanupState(state: SessionState) {
   try { state.child.kill("SIGKILL"); } catch {}
   state.inputAbort?.abort();
+  try { state.closeProxy?.(); } catch {}
   // Best-effort directory removal; fire and forget.
   fs.rm(state.outputDir, { recursive: true, force: true }).catch(() => {});
 }

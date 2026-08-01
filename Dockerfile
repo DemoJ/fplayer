@@ -33,4 +33,10 @@ ENV NODE_ENV=production
 ENV DATA_DIR=/data
 EXPOSE 3000
 VOLUME ["/data"]
+# Run as the unprivileged "node" user (uid 1000) so files created in the
+# bind-mounted /data belong to uid 1000 instead of root. That keeps host-side
+# tooling working (npm test / npm run dev read the same database) and makes
+# backups sane. Existing deployments must chown the data dir once, see README.
+RUN mkdir -p /data && chown -R node:node /data
+USER node
 CMD ["node", "dist-server/index.js"]

@@ -12,7 +12,7 @@
 .work-detail section h1 { font: 900 clamp(2.8rem, 5vw, 6rem)/1 "Noto Serif SC"; margin: 14px 0 20px; }
 .work-detail-top { grid-column: 1 / -1; display: flex; align-items: center; min-height: 24px; }
 .work-card { position: relative; min-width: 0; }
-.media-card { position: relative; min-width: 0; }
+.media-card { position: relative; min-width: 0; content-visibility: auto; contain-intrinsic-size: auto 300px; }
 .media-more { position: absolute; right: 8px; top: 8px; z-index: 3; width: 30px; height: 30px; border: 1px solid #ffffff40; border-radius: 50%; background: #090b0dcc; color: #fff; font-size: 1.2rem; line-height: 1; cursor: pointer; backdrop-filter: blur(8px); }
 .media-more:hover { border-color: var(--orange); color: var(--orange); }
 .media-menu { position: absolute; z-index: 4; top: 44px; right: 8px; min-width: 130px; padding: 5px; border: 1px solid #363a3d; background: #171a1d; box-shadow: 0 12px 30px #000b; }

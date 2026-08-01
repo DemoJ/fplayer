@@ -3,12 +3,30 @@ import { config } from "./config.js";
 import { db } from "./db.js";
 
 const DEFAULT_SECRET = "development-only-change-me";
+// The value hardcoded in docker-compose.yml. It is the project author's own
+// deployment secret, but it is committed to a public repository, so anyone
+// deploying from this repo MUST replace it before going live — otherwise the
+// WebDAV credentials encrypted with it can be decrypted by anyone who also
+// gets hold of the database.
+const KNOWN_PUBLIC_SECRET = "c699a24b5bd628fb002cd2e1bc74bd1fae771f2bd5257c20e344ecfe6c9a3f5a";
 let encryptionKey: Buffer | null = null;
 let signingKey: Buffer | null = null;
+
+function warnKnownPublicSecret() {
+  console.warn(
+    "\n" +
+      "⚠️  [FPlayer] 正在使用仓库中公开的 APP_SECRET（docker-compose.yml 硬编码值）。\n" +
+      "    该密钥已提交到公开仓库，任何拿到它的人都能解密你保存的 WebDAV 账号密码。\n" +
+      "    正式部署前请务必修改 docker-compose.yml 中的 APP_SECRET，例如：\n" +
+      "      APP_SECRET=$(openssl rand -hex 32)\n" +
+      "    注意：更换密钥后，之前保存的 WebDAV 密码将无法解密，需要重新填写。\n",
+  );
+}
 
 function loadKeys() {
   if (encryptionKey && signingKey) return;
   if (config.appSecret && config.appSecret !== DEFAULT_SECRET) {
+    if (config.appSecret === KNOWN_PUBLIC_SECRET) warnKnownPublicSecret();
     const material = createHash("sha256").update(config.appSecret).digest();
     encryptionKey = material;
     signingKey = createHash("sha256").update("sign:" + config.appSecret).digest();

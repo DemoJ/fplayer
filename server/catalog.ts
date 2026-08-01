@@ -127,7 +127,7 @@ export function identify(filePath: string) {
 }
 
 export function rebuildCatalog(sourceId?: number) {
-  const rows = db.prepare(`SELECT id,source_id,path FROM media WHERE available=1 ${sourceId ? "AND source_id=?" : ""}`).all(...(sourceId ? [sourceId] : [])) as Array<{ id: number; source_id: number; path: string }>;
+  const rows = db.prepare(`SELECT id,source_id,path FROM media WHERE available=1 AND trashed=0 ${sourceId ? "AND source_id=?" : ""}`).all(...(sourceId ? [sourceId] : [])) as Array<{ id: number; source_id: number; path: string }>;
   const upsert = db.prepare("INSERT INTO works(source_id,work_key,title,kind,year) VALUES(?,?,?,?,?) ON CONFLICT(source_id,work_key) DO UPDATE SET title=excluded.title,kind=excluded.kind,year=COALESCE(works.year,excluded.year) RETURNING id");
   const update = db.prepare("UPDATE media SET work_id=?,title=?,kind=?,season=?,episode=? WHERE id=?");
   db.transaction(() => {
@@ -136,6 +136,6 @@ export function rebuildCatalog(sourceId?: number) {
       const work = upsert.get(row.source_id, item.key, item.title, item.kind, item.year) as { id: number };
       update.run(work.id, item.title, item.kind, item.season, item.episode, row.id);
     }
-    db.prepare("DELETE FROM works WHERE NOT EXISTS(SELECT 1 FROM media WHERE media.work_id=works.id AND media.available=1)").run();
+    db.prepare("DELETE FROM works WHERE NOT EXISTS(SELECT 1 FROM media WHERE media.work_id=works.id AND media.available=1 AND media.trashed=0)").run();
   })();
 }

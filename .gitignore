@@ -2,5 +2,6 @@ node_modules/
 dist/
 dist-server/
 data/
+.test-data/
 .env
 *.log

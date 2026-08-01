@@ -50,7 +50,7 @@ export function getTranscodeAcceleration(): Promise<TranscodeAcceleration> {
   return detectedAcceleration;
 }
 
-export function transcodeArgs(acceleration: TranscodeAcceleration, segmentFile: string, playlistFile: string, input?: string, start = 0, quality: TranscodeQuality = "1080"): string[] {
+export function transcodeArgs(acceleration: TranscodeAcceleration, segmentFile: string, playlistFile: string, input?: string, start = 0, quality: TranscodeQuality = "1080", subtitleCodec?: string | null): string[] {
   // When input is an HTTP URL, let ffmpeg read it directly so it can seek and
   // manage the connection efficiently. Credentials are already embedded in the
   // URL, so no -headers option is needed. Otherwise pipe raw bytes via stdin.
@@ -63,15 +63,26 @@ export function transcodeArgs(acceleration: TranscodeAcceleration, segmentFile: 
       ? [...seekArgs, "-hwaccel", "auto", "-i", "pipe:0"]
       : [...seekArgs, "-i", "pipe:0"];
   const scale = SCALES[quality];
+  // HLS only carries text subtitles (WebVTT). PGS/DVD bitmap subs can't be
+  // converted by ffmpeg and would fail the whole transcode, so only map the
+  // track when we know it is text-based (from the cached probe result).
+  const textSubtitle = subtitleCodec ? /^(?:srt|subrip|ass|ssa|webvtt|text|mov_text)$/i.test(subtitleCodec) : false;
+  const subtitle = textSubtitle ? ["-map", "0:s:0?", "-c:s", "webvtt"] : [];
   const video = acceleration === "nvidia"
     ? [...(scale ? ["-vf", scale] : []), "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p"]
     : [...(scale ? ["-vf", scale] : []), "-c:v", "libx264", "-preset", "veryfast", "-crf", "21"];
   return [
     ...inputArgs,
     "-map", "0:v:0", "-map", "0:a:0?",
+    ...subtitle,
     ...video,
     "-c:a", "aac", "-b:a", "192k",
-    "-f", "hls", "-hls_time", "4", "-hls_list_size", "0",
+    "-f", "hls", "-hls_time", "4",
+    // Bounded segment window instead of keeping every segment: a 2-hour movie
+    // otherwise leaves ~3-4GB per session on disk (x4 concurrent sessions).
+    // Seeking outside the window restarts the transcode at the target position,
+    // so the player never loses access to old parts of the episode.
+    "-hls_list_size", "60",
     "-hls_flags", "independent_segments+omit_endlist",
     "-hls_segment_filename", segmentFile, playlistFile,
   ];

@@ -7,7 +7,7 @@
     "dev": "concurrently -k \"tsx watch server/index.ts\" \"vite\"",
     "build": "tsc -p tsconfig.server.json && vite build",
     "start": "node dist-server/index.js",
-    "test": "node --import tsx --test --test-concurrency=1 server/**/*.test.ts",
+    "test": "rm -rf .test-data && DATA_DIR=./.test-data node --import tsx --test --test-concurrency=1 server/**/*.test.ts; status=$?; rm -rf .test-data; exit $status",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {

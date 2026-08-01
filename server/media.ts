@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import http from "node:http";
 import { spawn } from "node:child_process";
 import { XMLParser } from "fast-xml-parser";
 import { db } from "./db.js";
@@ -40,29 +41,63 @@ async function walk(dir: string, root: string, files: MediaFile[], signal?: Abor
 }
 
 async function webdavList(source: Source, signal?: AbortSignal, progress?: ScanProgress): Promise<MediaFile[]> {
-  const current = source.base_path;
-  const url = new URL(current);
-  progress?.("connecting", 0, 0);
-  const response = await fetch(url, {
-    method: "PROPFIND",
-    headers: { Depth: "infinity", ...(source.username ? { Authorization: `Basic ${Buffer.from(`${source.username}:${decrypt(source.secret)}`).toString("base64")}` } : {}) },
-    signal,
-  });
-  if (!response.ok) throw new Error(`WebDAV returned ${response.status}`);
-  const body = parser.parse(await response.text());
-  const responses = body?.multistatus?.response ?? [];
-  const list = (Array.isArray(responses) ? responses : [responses]) as Array<Record<string, unknown>>;
   const files: MediaFile[] = [];
-  for (const item of list) {
+  const authHeaders: Record<string, string> = source.username
+    ? { Authorization: `Basic ${Buffer.from(`${source.username}:${decrypt(source.secret)}`).toString("base64")}` }
+    : {};
+  // Layered traversal: list one collection at a time (Depth: 1) and recurse.
+  // Some servers (Nextcloud and friends) reject or truncate Depth: infinity,
+  // and a single infinity response for a large library would otherwise be
+  // buffered fully in memory.
+  async function listCollection(dirUrl: URL, seen: Set<string>): Promise<URL[]> {
     throwIfAborted(signal);
-    const href = String(item.href || "");
-    const propstat = Array.isArray(item.propstat) ? item.propstat[0] : item.propstat;
-    const prop = (propstat as any)?.prop || {};
-    const resourceType = JSON.stringify(prop.resourcetype || "");
-    if (!resourceType.includes("collection") && extensions.has(path.extname(href).toLowerCase())) {
-      files.push({ path: decodeURIComponent(new URL(href, url).pathname), size: Number(prop.getcontentlength || 0), modifiedAt: String(prop.getlastmodified || "") });
-      progress?.("discovering", files.length, 0);
+    const timeout = AbortSignal.timeout(60_000);
+    const scanSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const response = await fetch(dirUrl, {
+      method: "PROPFIND",
+      headers: { Depth: "1", ...authHeaders },
+      signal: scanSignal,
+    });
+    if (!response.ok) throw new Error(`WebDAV returned ${response.status} (${dirUrl})`);
+    const body = parser.parse(await response.text());
+    const responses = body?.multistatus?.response ?? [];
+    const list = (Array.isArray(responses) ? responses : [responses]) as Array<Record<string, unknown>>;
+    const children: URL[] = [];
+    for (const item of list) {
+      throwIfAborted(signal);
+      const href = String(item.href || "");
+      if (!href) continue;
+      const child = new URL(href, dirUrl);
+      if (child.origin !== dirUrl.origin) continue;
+      const key = child.pathname.replace(/\/+$/, "");
+      if (key === dirUrl.pathname.replace(/\/+$/, "") || seen.has(key)) continue;
+      seen.add(key);
+      const propstats = Array.isArray(item.propstat) ? item.propstat : [item.propstat];
+      const propstat = (propstats as Array<Record<string, unknown>>).find((p) => String(p?.status || "").includes("200"));
+      const prop = (propstat as any)?.prop || {};
+      const resourceType = JSON.stringify(prop.resourcetype || "");
+      if (resourceType.includes("collection")) {
+        children.push(child);
+      } else if (extensions.has(path.extname(child.pathname).toLowerCase())) {
+        files.push({
+          path: decodeURIComponent(child.pathname),
+          size: Number(prop.getcontentlength || 0),
+          modifiedAt: String(prop.getlastmodified || ""),
+        });
+        progress?.("discovering", files.length, 0);
+      }
     }
+    return children;
+  }
+
+  const url = new URL(source.base_path);
+  progress?.("connecting", 0, 0);
+  const seen = new Set<string>([url.pathname.replace(/\/+$/, "")]);
+  const queue = [url];
+  while (queue.length) {
+    throwIfAborted(signal);
+    const dir = queue.shift()!;
+    queue.push(...await listCollection(dir, seen));
   }
   return files;
 }
@@ -128,4 +163,57 @@ export function mediaInputUrl(source: Source, mediaPath: string): string {
   u.username = encodeURIComponent(decoded.split(":")[0]);
   u.password = encodeURIComponent(decoded.slice(decoded.indexOf(":") + 1));
   return u.toString();
+}
+
+// Serves a WebDAV file through a localhost proxy that injects the credentials
+// per request, so the ffmpeg/ffprobe command line never carries the username
+// or password (URL-embedded credentials would leak via /proc/<pid>/cmdline).
+// The proxy is closed when the caller is done (fn resolves or rejects).
+export async function withCredentialProxy<T>(source: Source, mediaPath: string, fn: (url: string) => Promise<T>): Promise<T> {
+  const proxy = await startCredentialProxy(source, mediaPath);
+  try {
+    return await fn(proxy.url);
+  } finally {
+    proxy.close();
+  }
+}
+
+export async function startCredentialProxy(source: Source, mediaPath: string): Promise<{ url: string; close: () => void }> {
+  const upstream = sourceFile(source, mediaPath);
+  if (source.type === "local") return { url: upstream, close: () => {} };
+  const auth = webdavHeaders(source);
+  const server = http.createServer((req, res) => {
+    res.on("error", () => {});
+    const headers: Record<string, string> = { ...auth };
+    if (req.headers.range) headers.Range = String(req.headers.range);
+    fetch(upstream, { method: "GET", headers })
+      .then(async (up) => {
+        const out: Record<string, string> = {};
+        for (const key of ["content-type", "content-length", "content-range", "accept-ranges", "etag", "last-modified"]) {
+          const value = up.headers.get(key);
+          if (value) out[key] = value;
+        }
+        res.writeHead(up.status, out);
+        if (up.body) {
+          const reader = up.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value && !res.write(Buffer.from(value))) await new Promise((resolve) => res.once("drain", resolve));
+          }
+        }
+        res.end();
+      })
+      .catch(() => {
+        if (!res.headersSent) res.writeHead(502);
+        res.end();
+      });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = (server.address() as { port: number }).port;
+  const parsed = new URL(upstream);
+  return { url: `http://127.0.0.1:${port}${parsed.pathname}${parsed.search}`, close: () => server.close() };
 }

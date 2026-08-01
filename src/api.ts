@@ -41,6 +41,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 // Fetch a protected binary resource (poster/artwork) as a blob URL so the token
 // stays in the Authorization header instead of leaking into URL history/logs.
 const blobCache = new Map<string, string>();
+const BLOB_CACHE_MAX = 200;
 export async function authUrl(path: string): Promise<string | undefined> {
   const token = getToken();
   if (!token) return undefined;
@@ -53,6 +54,16 @@ export async function authUrl(path: string): Promise<string | undefined> {
   if (!response.ok) return undefined;
   const blob = await response.blob();
   const objectUrl = URL.createObjectURL(blob);
+  // Bounded FIFO cache: revoke the oldest entry so a long-lived session does
+  // not leak an unbounded number of object URLs.
+  if (blobCache.size >= BLOB_CACHE_MAX) {
+    const oldest = blobCache.keys().next().value;
+    if (oldest !== undefined) {
+      const oldUrl = blobCache.get(oldest);
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      blobCache.delete(oldest);
+    }
+  }
   blobCache.set(path, objectUrl);
   return objectUrl;
 }
