@@ -34,11 +34,17 @@
 .episodes::-webkit-scrollbar-thumb:hover { background: var(--orange); }
 .episodes::-webkit-scrollbar-corner { background: transparent; }
 .episodes h3 { color: var(--orange); font-size: .8rem; letter-spacing: .12em; margin: 25px 0 8px; }
-.episode { display: grid; grid-template-columns: 80px 1fr auto; align-items: center; gap: 12px; border-top: 1px solid #292c2e; padding: 13px 4px; }
+.episode-row { display: flex; align-items: stretch; border-top: 1px solid #292c2e; }
+.episode-row:hover { background: #15181a; }
+.episode { flex: 1; min-width: 0; display: grid; grid-template-columns: 80px 1fr auto; align-items: center; gap: 12px; padding: 13px 4px; }
+.episode:hover { background: transparent; }
 .episode span { color: var(--orange); font-size: .75rem; }
 .episode b { font-size: .78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .episode small { color: #666; }
-.episode:hover { background: #15181a; }
+.episode.done b { color: #8a8780; text-decoration: line-through; }
+.episode-done { flex: 0 0 auto; width: 34px; height: 34px; align-self: center; margin: 6px 6px 6px 0; border: 0; border-radius: 50%; background: transparent; color: #888; font-size: .95rem; cursor: pointer; transition: background .2s ease, color .2s ease; }
+.episode-done:hover { background: #252a2d; color: #fff; }
+.episode-done.done { color: var(--orange); }
 .metadata-panel {
   margin: 0 5vw 28px;
   padding: 22px 24px;
