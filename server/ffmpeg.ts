@@ -2,6 +2,20 @@ import { spawn } from "node:child_process";
 import { config } from "./config.js";
 
 export type TranscodeAcceleration = "cpu" | "nvidia";
+export type TranscodeQuality = "original" | "1080" | "720";
+
+// Per-quality scale filter. 4K HEVC transcodes slower than real time on small
+// GPUs, so a capped resolution is the default for transcoded playback; users
+// can pick a lower one to spare the GPU or "original" for full resolution.
+const SCALES: Record<TranscodeQuality, string | null> = {
+  original: null,
+  "1080": "scale='min(1920,iw)':-2",
+  "720": "scale='min(1280,iw)':-2",
+};
+
+export function isTranscodeQuality(value: string): value is TranscodeQuality {
+  return value === "original" || value === "1080" || value === "720";
+}
 
 let detectedAcceleration: Promise<TranscodeAcceleration> | undefined;
 
@@ -36,24 +50,29 @@ export function getTranscodeAcceleration(): Promise<TranscodeAcceleration> {
   return detectedAcceleration;
 }
 
-export function transcodeArgs(acceleration: TranscodeAcceleration, segmentFile: string, playlistFile: string, input?: string): string[] {
+export function transcodeArgs(acceleration: TranscodeAcceleration, segmentFile: string, playlistFile: string, input?: string, start = 0, quality: TranscodeQuality = "1080"): string[] {
   // When input is an HTTP URL, let ffmpeg read it directly so it can seek and
-  // manage the connection efficiently. Otherwise pipe raw bytes via stdin.
+  // manage the connection efficiently. Credentials are already embedded in the
+  // URL, so no -headers option is needed. Otherwise pipe raw bytes via stdin.
+  // -ss before -i seeks the input quickly so resume positions are transcoded
+  // immediately instead of waiting for the whole file to process.
+  const seekArgs = start > 0 ? ["-ss", String(start)] : [];
   const inputArgs = input
-    ? ["-headers", input, "-i", input]
+    ? [...seekArgs, "-i", input]
     : acceleration === "nvidia"
-      ? ["-hwaccel", "auto", "-i", "pipe:0"]
-      : ["-i", "pipe:0"];
+      ? [...seekArgs, "-hwaccel", "auto", "-i", "pipe:0"]
+      : [...seekArgs, "-i", "pipe:0"];
+  const scale = SCALES[quality];
   const video = acceleration === "nvidia"
-    ? ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p"]
-    : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21"];
+    ? [...(scale ? ["-vf", scale] : []), "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p"]
+    : [...(scale ? ["-vf", scale] : []), "-c:v", "libx264", "-preset", "veryfast", "-crf", "21"];
   return [
     ...inputArgs,
     "-map", "0:v:0", "-map", "0:a:0?",
     ...video,
     "-c:a", "aac", "-b:a", "192k",
-    "-f", "hls", "-hls_time", "4", "-hls_list_size", "6",
-    "-hls_flags", "delete_segments+independent_segments+omit_endlist",
+    "-f", "hls", "-hls_time", "4", "-hls_list_size", "0",
+    "-hls_flags", "independent_segments+omit_endlist",
     "-hls_segment_filename", segmentFile, playlistFile,
   ];
 }

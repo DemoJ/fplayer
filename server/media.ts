@@ -116,3 +116,16 @@ export function sourceFile(source: Source, relativePath: string) {
 export function webdavHeaders(source: Source): Record<string, string> {
   return source.username ? { Authorization: `Basic ${Buffer.from(`${source.username}:${decrypt(source.secret)}`).toString("base64")}` } : {};
 }
+
+// Builds the input ffmpeg/ffprobe should read: a local path, or the WebDAV URL
+// with credentials embedded so no header has to be passed on the command line.
+export function mediaInputUrl(source: Source, mediaPath: string): string {
+  if (source.type === "local") return path.join(source.base_path, mediaPath);
+  const url = sourceFile(source, mediaPath);
+  if (!source.username || !source.secret) return url;
+  const decoded = Buffer.from(`${source.username}:${decrypt(source.secret)}`).toString("utf8");
+  const u = new URL(url);
+  u.username = encodeURIComponent(decoded.split(":")[0]);
+  u.password = encodeURIComponent(decoded.slice(decoded.indexOf(":") + 1));
+  return u.toString();
+}

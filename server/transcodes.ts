@@ -11,6 +11,9 @@ type SessionState = {
   lastAccess: number;
   inputStream?: ReadableStream<Uint8Array> | null;
   inputAbort?: AbortController | null;
+  // Set once ffmpeg has exited; the session may still be held for file access
+  // until the reaper reclaims it, but it no longer consumes an encoder slot.
+  exited: boolean;
 };
 
 const sessions = new Map<string, SessionState>();
@@ -18,8 +21,13 @@ const MAX_CONCURRENT = 4;
 const IDLE_TTL = 5 * 60 * 1000; // 5 min without access -> reclaim
 const DISCONNECT_GRACE = 60 * 1000; // keep transcoding 60s after client disconnect
 
+// Only count sessions whose ffmpeg is still running. A finished session lingers
+// in the map until the reaper reclaims it; counting it would falsely saturate
+// the concurrent transcode limit and reject new requests with 429.
 export function activeCount() {
-  return sessions.size;
+  let count = 0;
+  for (const state of sessions.values()) if (!state.exited) count++;
+  return count;
 }
 
 export function maxConcurrent() {
@@ -28,6 +36,10 @@ export function maxConcurrent() {
 
 export function register(session: string, state: SessionState) {
   sessions.set(session, state);
+  state.child.once("close", () => {
+    const current = sessions.get(session);
+    if (current === state) current.exited = true;
+  });
 }
 
 export function get(session: string) {
@@ -84,4 +96,19 @@ export async function ensureDir(session: string) {
 
 export function fileExists(full: string) {
   return fsSync.existsSync(full);
+}
+
+// Remove any leftover transcode directories from a previous run. Sessions are
+// tracked only in memory, so after a restart no reaper ever visits these — a
+// large episode can leave hundreds of MB behind permanently.
+export async function sweepStaleDirectories() {
+  const root = path.join(config.dataDir, "transcodes");
+  try {
+    for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      await fs.rm(path.join(root, entry.name), { recursive: true, force: true }).catch(() => {});
+    }
+  } catch {
+    // Directory missing (fresh install) — nothing to do.
+  }
 }

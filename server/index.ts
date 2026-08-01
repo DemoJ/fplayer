@@ -7,13 +7,13 @@ import express from "express";
 import { db } from "./db.js";
 import { config } from "./config.js";
 import { encrypt, hashPassword, hashToken, newSessionToken, signTranscode, verifyPassword, verifyTranscodeSig } from "./security.js";
-import { sourceFile, webdavHeaders } from "./media.js";
-import { activeCount, destroy, ensureDir, fileExists, get, maxConcurrent, noteDisconnect, owns, register } from "./transcodes.js";
+import { mediaInputUrl, probe, sourceFile, webdavHeaders } from "./media.js";
+import { activeCount, destroy, ensureDir, fileExists, get, maxConcurrent, owns, register, sweepStaleDirectories } from "./transcodes.js";
 import { startScan, stopScan } from "./scans.js";
 import { rebuildCatalog } from "./catalog.js";
 import { metadataStatus, startMetadataRefresh, stopMetadataRefresh, checkDoubanLogin, refreshWorkMetadata } from "./metadata.js";
 import { getDoubanSettings, saveDoubanSettings } from "./douban.js";
-import { getTranscodeAcceleration, transcodeArgs } from "./ffmpeg.js";
+import { getTranscodeAcceleration, isTranscodeQuality, transcodeArgs, type TranscodeQuality } from "./ffmpeg.js";
 import type { AuthRequest, Source } from "./types.js";
 
 const app = express(); app.use(express.json());
@@ -89,6 +89,54 @@ app.get("/api/continue", auth, (req: AuthRequest, res) => {
     ORDER BY p.updated_at DESC
     LIMIT ?
   `).all(req.user!.id, limit);
+  res.json(rows);
+});
+app.get("/api/up-next", auth, (req: AuthRequest, res) => {
+  const limit = Math.min(24, Math.max(1, Number(req.query.limit) || 10));
+  // For every show, take the most recently completed episode, then find the
+  // next episode in the same work. Only include it while it hasn't been started
+  // yet (position <= 5 keeps it out of /continue, so it never shows twice).
+  const rows = db.prepare(`
+    WITH latest AS (
+      SELECT m.work_id, m.season AS s, m.episode AS e, p.updated_at,
+             ROW_NUMBER() OVER (PARTITION BY m.work_id ORDER BY p.updated_at DESC) AS rn
+      FROM progress p
+      JOIN media m ON m.id = p.media_id
+      WHERE p.user_id = ? AND p.completed = 1 AND m.work_id IS NOT NULL
+        AND m.season IS NOT NULL AND m.episode IS NOT NULL
+    ),
+    picked AS (SELECT work_id, s, e, updated_at FROM latest WHERE rn = 1),
+    pairs AS (
+      SELECT m.work_id, m.season AS s, m.episode AS e
+      FROM media m
+      WHERE m.available = 1 AND m.season IS NOT NULL AND m.episode IS NOT NULL
+      GROUP BY m.work_id, m.season, m.episode
+    ),
+    next_pair AS (
+      SELECT p.work_id, pr.s AS ns, pr.e AS ne,
+             ROW_NUMBER() OVER (PARTITION BY p.work_id ORDER BY pr.s, pr.e) AS rn
+      FROM picked p
+      JOIN pairs pr ON pr.work_id = p.work_id AND (pr.s > p.s OR (pr.s = p.s AND pr.e > p.e))
+    ),
+    np AS (SELECT work_id, ns, ne FROM next_pair WHERE rn = 1),
+    target AS (
+      SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.work_id, m.season, m.episode ORDER BY m.size DESC, m.id) AS rn
+      FROM media m
+      JOIN np ON np.work_id = m.work_id AND np.ns = m.season AND np.ne = m.episode
+      WHERE m.available = 1
+    )
+    SELECT t.id, t.title, t.kind, t.season, t.episode, t.duration, t.size, t.container, t.work_id,
+           w.title AS work_title, w.poster_path AS work_poster, s.name AS source_name,
+           p.s AS from_season, p.e AS from_episode
+    FROM target t
+    JOIN works w ON w.id = t.work_id
+    JOIN sources s ON s.id = t.source_id
+    JOIN picked p ON p.work_id = t.work_id
+    LEFT JOIN progress nextp ON nextp.media_id = t.id AND nextp.user_id = ?
+    WHERE t.rn = 1 AND (nextp.position IS NULL OR nextp.position <= 5)
+    ORDER BY p.updated_at DESC
+    LIMIT ?
+  `).all(req.user!.id, req.user!.id, limit);
   res.json(rows);
 });
 app.get("/api/recent", auth, (req: AuthRequest, res) => {
@@ -180,6 +228,29 @@ app.get("/api/browse", auth, (req: AuthRequest, res) => {
 app.get("/api/works", auth, (req: AuthRequest, res) => { const q = String(req.query.q || ""); const kind = String(req.query.kind || ""); const rows = db.prepare(`SELECT w.*,COUNT(DISTINCT m.id) AS file_count,COUNT(DISTINCT CASE WHEN m.season IS NOT NULL THEN m.season END) AS season_count,MAX(p.updated_at) AS last_watched_at FROM works w LEFT JOIN media m ON m.work_id=w.id AND m.available=1 LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE w.title LIKE ? AND (?='' OR w.kind=?) GROUP BY w.id ORDER BY w.title COLLATE NOCASE`).all(req.user!.id, `%${q}%`, kind, kind); res.json(rows); });
 app.get("/api/works/:id", auth, (req, res) => { const work = db.prepare("SELECT * FROM works WHERE id=?").get(req.params.id); if (!work) return res.status(404).json({ error: "作品不存在" }); const media = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.work_id=? AND m.available=1 ORDER BY m.season,m.episode,m.size DESC").all((req as AuthRequest).user!.id, req.params.id); res.json({ work, media }); });
 app.get("/api/media/:id", auth, (req: AuthRequest, res) => { const row = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=?").get(req.user!.id, req.params.id); row ? res.json(row) : res.status(404).json({ error: "媒体不存在" }); });
+// Probes a media file (ffprobe reading the source directly) and caches the
+// codec info in the media row. The player uses this to decide whether the
+// browser can play the file natively or whether it must go through
+// transcoding, avoiding a full download of the original file first.
+app.post("/api/media/:id/probe", auth, openMedia, async (req: AuthRequest, res) => {
+  const media = (req as any).media as Source & { media_path: string };
+  try {
+    const info = await probe(mediaInputUrl(media, media.media_path));
+    const video = (info.streams || []).find((stream: any) => stream.codec_type === "video");
+    const audio = (info.streams || []).find((stream: any) => stream.codec_type === "audio");
+    db.prepare("UPDATE media SET duration=?,container=?,video_codec=?,audio_codec=? WHERE id=?").run(
+      Number(info.format?.duration) || null,
+      String(info.format?.format_name || "").split(",")[0] || null,
+      video?.codec_name || null,
+      audio?.codec_name || null,
+      media.id,
+    );
+    const updated = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=?").get(req.user!.id, media.id);
+    res.json({ media: updated });
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : "媒体探测失败" });
+  }
+});
 app.put("/api/media/:id", auth, admin, async (req, res) => {
   const media = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(req.params.id) as any;
   if (!media) return res.status(404).json({ error: "媒体不存在" });
@@ -227,13 +298,46 @@ app.delete("/api/media/:id", auth, admin, async (req, res) => {
     res.status(400).json({ error: error instanceof Error ? error.message : "删除文件失败" });
   }
 });
-app.put("/api/media/:id/progress", auth, (req: AuthRequest, res) => { const { position = 0, duration = 0, completed = false } = req.body; db.prepare("INSERT INTO progress(user_id,media_id,position,duration,completed) VALUES(?,?,?,?,?) ON CONFLICT(user_id,media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,completed=excluded.completed,updated_at=CURRENT_TIMESTAMP").run(req.user!.id, req.params.id, position, duration, completed ? 1 : 0); res.json({ ok: true }); });
-async function openMedia(req: AuthRequest, res: express.Response, next: express.NextFunction) { const media = db.prepare("SELECT m.path media_path,m.size media_size,s.* FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(req.params.id) as any; if (!media) return res.status(404).end(); (req as any).media = media; next(); }
-app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => { const media = (req as any).media as Source & { media_path: string; media_size: number }; const url = sourceFile(media, media.media_path); const range = req.headers.range; const headers: any = { ...webdavHeaders(media) }; if (range) headers.Range = range; const upstream = media.type === "local" ? null : await fetch(url, { headers }); if (media.type === "local") { res.setHeader("Accept-Ranges", "bytes"); res.sendFile(path.resolve(url)); return; } if (!upstream?.ok && upstream?.status !== 206) { if (upstream?.status === 416 || upstream?.status === 429) { const body = await upstream.text().catch(() => ""); if (upstream.status === 429 || body.includes("429") || body.toLowerCase().includes("too many")) return res.status(429).json({ error: "网盘请求过于频繁，请稍后重试" }); } return res.status(upstream?.status || 502).json({ error: "无法读取媒体文件" }); } res.status(upstream.status); ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => { const value = upstream.headers.get(header); if (value) res.setHeader(header, value); }); res.setHeader("Content-Disposition", "inline"); // Close the upstream connection when the client disconnects so we don't
+app.put("/api/media/:id/progress", auth, (req: AuthRequest, res) => {
+  const position = Math.max(0, Number(req.body?.position) || 0);
+  const duration = Math.max(0, Number(req.body?.duration) || 0);
+  const requestedCompleted = Boolean(req.body?.completed);
+  // Server-side completion guard: only when the position is essentially at the
+  // very end (last 15s). The client is the source of truth for completion —
+  // it knows whether the end was reached by watching or by a drag/seek — so
+  // the loose "last 90s or 5%" fallback would re-mark dragged positions done.
+  const nearEnd = duration > 0 && position >= duration - 15;
+  const completed = requestedCompleted || nearEnd ? 1 : 0;
+  db.prepare("INSERT INTO progress(user_id,media_id,position,duration,completed) VALUES(?,?,?,?,?) ON CONFLICT(user_id,media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,completed=excluded.completed,updated_at=CURRENT_TIMESTAMP").run(req.user!.id, req.params.id, position, duration, completed); res.json({ ok: true });
+});
+async function openMedia(req: AuthRequest, res: express.Response, next: express.NextFunction) {
+  // Select source fields explicitly: `s.*` would overwrite m.id with the
+  // source id, breaking every downstream use of media.id.
+  const media = db.prepare("SELECT m.id, m.path media_path, m.size media_size, m.source_id, s.type, s.base_path, s.username, s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(req.params.id) as any;
+  if (!media) return res.status(404).end(); (req as any).media = media; next();
+}
+app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => { const media = (req as any).media as Source & { media_path: string; media_size: number }; const url = sourceFile(media, media.media_path); const range = req.headers.range; const headers: any = { ...webdavHeaders(media) }; if (range) headers.Range = range; const upstream = media.type === "local" ? null : await fetch(url, { headers }); if (media.type === "local") { res.setHeader("Accept-Ranges", "bytes"); res.sendFile(path.resolve(url)); return; } if (!upstream?.ok && upstream?.status !== 206) { if (upstream?.status === 416 || upstream?.status === 429) { const body = await upstream.text().catch(() => ""); if (upstream.status === 429 || body.includes("429") || body.toLowerCase().includes("too many")) return res.status(429).json({ error: "网盘请求过于频繁，请稍后重试" }); } return res.status(upstream?.status || 502).json({ error: "无法读取媒体文件" }); }   res.status(upstream.status); ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => { const value = upstream.headers.get(header); if (value) res.setHeader(header, value); }); res.setHeader("Content-Disposition", "inline"); // Close the upstream connection when the client disconnects so we don't
   // keep downloading from the WebDAV source after the browser stops reading.
-  const onClose = () => { try { upstream.body?.cancel(); } catch {} }; res.on("close", onClose); if (upstream.body) for await (const chunk of upstream.body) { if (!res.write(chunk)) await new Promise<void>((resolve) => res.once("drain", resolve)); } res.end(); });
+  // Note: cancel() returns a rejected promise when the stream is mid-read
+  // (locked by the for-await loop) — the rejection must be swallowed or the
+  // process dies from an unhandled rejection.
+  const onClose = () => { try { upstream.body?.cancel().catch(() => {}); } catch {} }; res.on("close", onClose);
+  // When the client disconnects mid-write, `drain` never fires and an await on
+  // it alone would hang the request forever. Resolve on `close` as well.
+  const waitForDrain = () => new Promise<void>((resolve) => { res.once("drain", resolve); res.once("close", resolve); });
+  try {
+    if (upstream.body) for await (const chunk of upstream.body) {
+      if (res.destroyed) break;
+      if (!res.write(chunk)) await waitForDrain();
+    }
+  } catch {} // upstream cancelled on client disconnect; ignore.
+  res.end(); });
 app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, res) => {
   const media = (req as any).media as Source & { media_path: string };
+  // Resume position: start transcoding from this offset in the source file so
+  // a resumed episode becomes playable immediately instead of from the top.
+  const start = Math.max(0, Number(req.body?.start) || 0);
+  const quality: TranscodeQuality = isTranscodeQuality(String(req.body?.quality || "")) ? req.body.quality : "1080";
   if (activeCount() >= maxConcurrent()) return res.status(429).json({ error: "转码并发已满，请稍后再试" });
   const session = randomUUID();
   const outputDir = await ensureDir(session);
@@ -251,42 +355,51 @@ app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, r
   let localStream: ReadableStream<Uint8Array> | null = null;
   const inputAbort = new AbortController();
   if (media.type === "webdav") {
-    const url = sourceFile(media, media.media_path);
-    const authHeader = webdavHeaders(media);
-    // Build a URL with embedded credentials so ffmpeg can read it directly
-    // without exposing the Basic auth header on the command line via -headers.
-    if (authHeader.Authorization) {
-      const basic = authHeader.Authorization.replace("Basic ", "");
-      const decoded = Buffer.from(basic, "base64").toString("utf8");
-      const u = new URL(url);
-      u.username = encodeURIComponent(decoded.split(":")[0]);
-      u.password = encodeURIComponent(decoded.slice(decoded.indexOf(":") + 1));
-      ffmpegInput = u.toString();
-    } else {
-      ffmpegInput = url;
-    }
+    ffmpegInput = mediaInputUrl(media, media.media_path);
   } else {
-    localStream = fsSync.createReadStream(sourceFile(media, media.media_path)) as unknown as ReadableStream<Uint8Array>;
+    localStream = fsSync.createReadStream(mediaInputUrl(media, media.media_path)) as unknown as ReadableStream<Uint8Array>;
   }
-  const args = transcodeArgs(acceleration, segFile, playlistFile, ffmpegInput);
+  const args = transcodeArgs(acceleration, segFile, playlistFile, ffmpegInput, start, quality);
   const child = spawn(config.ffmpeg, args, { stdio: ffmpegInput ? ["ignore", "ignore", "pipe"] : ["pipe", "ignore", "pipe"] });
   let ffmpegError = ""; child.stderr?.on("data", (chunk) => { ffmpegError = (ffmpegError + chunk).slice(-4000); });
   if (localStream) {
-    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: localStream, inputAbort });
+    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: localStream, inputAbort, exited: false });
     const nodeStream = localStream as any;
     nodeStream.pipe(child.stdin, { end: true });
     nodeStream.on("error", () => { try { child.stdin?.end(); } catch {} });
     child.stdin?.on("error", () => {});
   } else {
-    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: null, inputAbort });
+    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: null, inputAbort, exited: false });
   }
-  child.on("close", (code) => { if (code && !fileExists(playlistFile)) fs.writeFile(path.join(outputDir, "error.txt"), ffmpegError).catch(() => {}); });
-  // Stop feeding the ffmpeg if the client disconnects during start-up; the reaper
-  // will reclaim the session after a grace period so brief seek pauses survive.
-  const onClientClose = () => noteDisconnect(session);
+  child.on("close", (code) => {
+    if (code && !fileExists(playlistFile)) fs.writeFile(path.join(outputDir, "error.txt"), ffmpegError).catch(() => {});
+    // Normal finish (or session kill): finalize the playlist so the player
+    // reaches a proper ended state instead of hanging on a live stream. With
+    // -hls_list_size 0 all segments are kept, so the player can always fetch
+    // its current position.
+    fs.appendFile(playlistFile, "#EXT-X-ENDLIST\n").catch(() => {});
+  });
+  // If the client disconnects during start-up nothing is playable yet, so stop
+  // ffmpeg immediately instead of letting the reaper reclaim it minutes later.
+  // (After the playlist is ready the listener is removed below.)
+  const onClientClose = () => destroy(session);
   res.on("close", onClientClose);
+  const countSegments = async () => {
+    try { return (await fs.readFile(playlistFile, "utf8")).match(/^segment-\d+\.ts/gm)?.length ?? 0; } catch { return 0; }
+  };
   for (let attempt = 0; attempt < 300; attempt++) { // 30s start-up window
+    if (res.destroyed || res.writableEnded) { destroy(session); return; }
     if (fileExists(playlistFile)) {
+      // Pre-warm: a cold ffmpeg run (WebDAV connect + GPU init + first decode)
+      // is slowest on the very first frames, so hand the stream over only after
+      // a few segments exist. Otherwise the player burns through segment #1 and
+      // stalls waiting for #2 — the "plays a few seconds, then buffers" hiccup.
+      const warmDeadline = Date.now() + 5000;
+      while (Date.now() < warmDeadline) {
+        if (res.destroyed || res.writableEnded) { destroy(session); return; }
+        if ((await countSegments()) >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
       res.off("close", onClientClose);
       return res.json({ session, playlist: `/api/transcode/${session}/index.m3u8` });
     }
@@ -298,6 +411,25 @@ app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, r
   res.status(504).json({ error: "转码启动超时" });
 });
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Stops a running transcode session early (e.g. when the user switches
+// quality), so its ffmpeg process stops hogging the GPU immediately.
+app.delete("/api/transcode/:session", auth, (req: AuthRequest, res) => {
+  const session = String(req.params.session);
+  if (!UUID_RE.test(session)) return res.status(400).json({ error: "无效的转码会话" });
+  if (!owns(session, req.user!.id)) return res.status(403).end();
+  destroy(session);
+  res.json({ ok: true });
+});
+// The player pings this while mounted so a paused stream is not reclaimed by
+// the idle reaper: pausing stops HLS segment requests, which would otherwise
+// freeze lastAccess and kill the ffmpeg process within the idle TTL.
+app.get("/api/transcode/:session/keepalive", auth, (req: AuthRequest, res) => {
+  const session = String(req.params.session);
+  if (!UUID_RE.test(session)) return res.status(400).json({ error: "无效的转码会话" });
+  if (!owns(session, req.user!.id)) return res.status(403).end();
+  get(session);
+  res.json({ ok: true });
+});
 app.get("/api/transcode/:session/:file", auth, async (req: AuthRequest, res) => {
   const session = String(req.params.session);
   if (!UUID_RE.test(session)) return res.status(400).json({ error: "无效的转码会话" });
@@ -329,4 +461,5 @@ app.get("/api/transcode/:session/:file", auth, async (req: AuthRequest, res) => 
 });
 app.get(/^(?!\/api).*/, (_req, res) => res.sendFile(path.resolve("dist/index.html")));
 rebuildCatalog();
+void sweepStaleDirectories();
 app.listen(config.port, () => console.log(`FPlayer listening on :${config.port}`));

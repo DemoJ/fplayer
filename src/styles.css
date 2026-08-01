@@ -106,6 +106,8 @@
 .player-page { position: fixed; inset: 0; width: 100vw; height: 100dvh; min-height: 0; overflow: hidden; }
 .player-chrome { position: absolute; z-index: 5; inset: 0 0 auto; min-height: 118px; display: flex; align-items: flex-start; gap: 13px; padding: calc(18px + env(safe-area-inset-top)) calc(22px + env(safe-area-inset-right)) 38px calc(18px + env(safe-area-inset-left)); background: linear-gradient(180deg, #000d 0%, #0008 42%, transparent 100%); opacity: 0; transform: translateY(-8px); pointer-events: none; transition: opacity .25s ease, transform .25s ease; }
 .player-page.chrome-visible .player-chrome, .player-page:focus-within .player-chrome { opacity: 1; transform: translateY(0); }
+/* Hide the cursor while idle and the chrome is hidden; any mouse move brings it back. */
+.player-page:not(.chrome-visible):not(:focus-within) { cursor: none; }
 .player-back { position: relative; flex: 0 0 auto; width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 50%; background: #ffffff14; color: #fff; padding: 0; cursor: pointer; pointer-events: auto; backdrop-filter: blur(12px); transition: background .2s ease, transform .2s ease; }
 .player-back span { display: block; margin-top: -3px; font: 300 2rem/1 system-ui, sans-serif; }
 .player-back:hover { background: #ffffff28; transform: translateX(-2px); }
@@ -122,6 +124,51 @@
 .player-error > strong { font: 700 1.15rem/1.45 "Noto Serif SC"; }
 .player-error > div { display: flex; gap: 10px; margin-top: 8px; }
 .player-error button { padding: 10px 18px; }
+.player-controls .ep-skip-btn { color: #fff; }
+.player-controls .ep-skip-btn:disabled { opacity: .32; cursor: default; }
+.player-controls .ep-skip-btn:disabled:hover { background: transparent; }
+.player-controls { position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 12px; padding: 14px 18px calc(14px + env(safe-area-inset-bottom)); background: linear-gradient(0deg, #000d 0%, #0007 55%, transparent 100%); opacity: 0; transform: translateY(6px); pointer-events: none; transition: opacity .25s ease, transform .25s ease; }
+.player-page.chrome-visible .player-controls, .player-page:focus-within .player-controls { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.player-btn { flex: 0 0 auto; width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; color: #fff; padding: 0; cursor: pointer; transition: background .2s ease; }
+.player-btn:hover { background: #ffffff1f; }
+.player-volume-wrap { position: relative; flex: 0 0 auto; }
+/* Extend the hover zone from the button up to the slider so moving the mouse
+   between them never drops the slider open. */
+.player-volume-wrap::before {
+  content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: 36px; width: 46px; height: 110px;
+}
+.player-volume-slider {
+  position: absolute; bottom: 42px; left: 50%; transform: translateX(-50%) translateY(6px);
+  height: 96px; padding: 8px 6px; display: flex; align-items: center; justify-content: center;
+  border: 1px solid #363a3d; background: #171a1d; box-shadow: 0 12px 30px #000b; border-radius: 8px;
+  opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease;
+}
+.player-volume-wrap:hover .player-volume-slider,
+.player-volume-slider:hover,
+.player-volume-wrap:focus-within .player-volume-slider { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
+.player-volume-slider input {
+  writing-mode: vertical-lr; direction: rtl;
+  width: 6px; height: 76px; margin: 0; cursor: pointer; accent-color: var(--orange);
+}
+.player-quality-wrap { position: relative; flex: 0 0 auto; }
+.quality-btn { width: auto; padding: 0 12px; border-radius: 18px; font-size: .72rem; font-weight: 700; letter-spacing: .03em; display: flex; align-items: center; gap: 6px; }
+.quality-btn svg { opacity: .85; }
+.quality-btn span { line-height: 1; }
+.player-quality-menu { position: absolute; right: 0; bottom: 44px; min-width: 140px; padding: 5px; border: 1px solid #363a3d; background: #171a1d; box-shadow: 0 12px 30px #000b; }
+.player-quality-menu button { display: block; width: 100%; border: 0; background: transparent; color: #ddd; padding: 9px 12px; text-align: left; font-size: .74rem; cursor: pointer; }
+.player-quality-menu button:hover { background: #252a2d; color: #fff; }
+.player-quality-menu button.active { color: var(--orange); }
+.player-time { flex: 0 0 auto; color: #ddd; font-size: .74rem; font-variant-numeric: tabular-nums; text-shadow: 0 1px 4px #000; }
+.player-timeline { position: relative; flex: 1; height: 26px; display: grid; align-items: center; cursor: pointer; touch-action: none; }
+.player-timeline-track { position: relative; height: 4px; border-radius: 2px; background: #ffffff2e; }
+.player-timeline-track i { position: absolute; top: 0; bottom: 0; display: block; border-radius: 2px; }
+.player-timeline-buffered { left: 0; background: #ffffff40; }
+.player-timeline-fill { left: 0; background: var(--orange); }
+.player-timeline-thumb { top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--orange); box-shadow: 0 0 6px #000c; transition: transform .15s ease; }
+.player-timeline:hover .player-timeline-thumb { transform: scale(1.25); }
+.player-timeline-preview { width: 1px; margin-left: -.5px; background: #fff; opacity: .9; }
+.player-timeline-time { position: absolute; bottom: 24px; transform: translateX(-50%); background: #000c; border: 1px solid #ffffff2a; color: #fff; font-size: .72rem; font-variant-numeric: tabular-nums; padding: 3px 8px; border-radius: 3px; white-space: nowrap; pointer-events: none; text-shadow: none; }
 @keyframes player-spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1199px) and (min-width: 601px) {
@@ -148,5 +195,10 @@
   .player-chrome { min-height: 88px; padding: calc(10px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) 28px calc(10px + env(safe-area-inset-left)); }
   .player-back { width: 38px; height: 38px; }
   .player-heading { display: none; }
+  .player-controls { gap: 9px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+  .player-btn { width: 34px; height: 34px; }
+  .quality-btn { padding: 0 10px; gap: 5px; }
+  .player-volume-slider { display: none; }
+  .player-time { font-size: .68rem; }
   .player-error { padding: 20px 18px; }
 }
