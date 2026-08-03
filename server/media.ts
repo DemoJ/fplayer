@@ -168,17 +168,24 @@ export function mediaInputUrl(source: Source, mediaPath: string): string {
 // Serves a WebDAV file through a localhost proxy that injects the credentials
 // per request, so the ffmpeg/ffprobe command line never carries the username
 // or password (URL-embedded credentials would leak via /proc/<pid>/cmdline).
-// The proxy is closed when the caller is done (fn resolves or rejects).
-export async function withCredentialProxy<T>(source: Source, mediaPath: string, fn: (url: string) => Promise<T>): Promise<T> {
-  const proxy = await startCredentialProxy(source, mediaPath);
-  try {
-    return await fn(proxy.url);
-  } finally {
-    proxy.close();
-  }
-}
+export type CredentialProxy = { url: string; release: () => void };
 
-export async function startCredentialProxy(source: Source, mediaPath: string): Promise<{ url: string; close: () => void }> {
+// Reused credential proxies, keyed by `${sourceId}:${mediaPath}`. A proxy lives
+// for the lifetime of the media being watched: every transcode restart (seek)
+// grabs the same proxy instead of opening a fresh HTTP connection to the drive.
+// Each ffmpeg holds one reference; the proxy closes when the last reference is
+// released and the idle grace elapses. This is the key to "seek without
+// re-arming the connection" — Jellyfin's LiveStream model.
+type ProxyPoolEntry = {
+  url: string;
+  refs: number;
+  close: () => void;
+  idleTimer?: NodeJS.Timeout;
+};
+const proxyPool = new Map<string, ProxyPoolEntry>();
+const PROXY_IDLE_TTL = 2 * 60 * 1000; // close an unreferenced proxy after 2 min
+
+async function startCredentialProxy(source: Source, mediaPath: string): Promise<{ url: string; close: () => void }> {
   const upstream = sourceFile(source, mediaPath);
   if (source.type === "local") return { url: upstream, close: () => {} };
   const auth = webdavHeaders(source);
@@ -216,4 +223,48 @@ export async function startCredentialProxy(source: Source, mediaPath: string): P
   const port = (server.address() as { port: number }).port;
   const parsed = new URL(upstream);
   return { url: `http://127.0.0.1:${port}${parsed.pathname}${parsed.search}`, close: () => server.close() };
+}
+
+// Acquire a shared credential proxy for a media file. Local sources return a
+// no-op proxy (the local path is used directly, no localhost hop needed).
+export async function acquireCredentialProxy(source: Source, mediaPath: string): Promise<CredentialProxy> {
+  const upstream = sourceFile(source, mediaPath);
+  if (source.type === "local") return { url: upstream, release: () => {} };
+  const key = `${source.id}:${mediaPath}`;
+  const existing = proxyPool.get(key);
+  if (existing) {
+    existing.refs++;
+    if (existing.idleTimer) { clearTimeout(existing.idleTimer); existing.idleTimer = undefined; }
+    return { url: existing.url, release: () => releaseCredentialProxy(key) };
+  }
+  const created = await startCredentialProxy(source, mediaPath);
+  proxyPool.set(key, { url: created.url, refs: 1, close: created.close });
+  return { url: created.url, release: () => releaseCredentialProxy(key) };
+}
+
+function releaseCredentialProxy(key: string) {
+  const entry = proxyPool.get(key);
+  if (!entry) return;
+  entry.refs = Math.max(0, entry.refs - 1);
+  if (entry.refs === 0) {
+    if (entry.idleTimer) clearTimeout(entry.idleTimer);
+    entry.idleTimer = setTimeout(() => {
+      const current = proxyPool.get(key);
+      if (current && current.refs === 0) {
+        proxyPool.delete(key);
+        current.close();
+      }
+    }, PROXY_IDLE_TTL);
+    entry.idleTimer.unref?.();
+  }
+}
+
+// Simple one-shot proxy for short operations (probe): acquire, use, release.
+export async function withCredentialProxy<T>(source: Source, mediaPath: string, fn: (url: string) => Promise<T>): Promise<T> {
+  const proxy = await acquireCredentialProxy(source, mediaPath);
+  try {
+    return await fn(proxy.url);
+  } finally {
+    proxy.release();
+  }
 }

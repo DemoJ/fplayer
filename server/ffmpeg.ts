@@ -3,6 +3,10 @@ import { config } from "./config.js";
 
 export type TranscodeAcceleration = "cpu" | "nvidia";
 export type TranscodeQuality = "original" | "1080" | "720";
+// remux = stream copy (container change only, no re-encode) for codecs the
+// browser can decode but whose container it cannot play (e.g. h264 in MKV).
+// transcode = full re-encode (e.g. HEVC).
+export type TranscodeMode = "transcode" | "remux";
 
 // Per-quality scale filter. 4K HEVC transcodes slower than real time on small
 // GPUs, so a capped resolution is the default for transcoded playback; users
@@ -15,6 +19,10 @@ const SCALES: Record<TranscodeQuality, string | null> = {
 
 export function isTranscodeQuality(value: string): value is TranscodeQuality {
   return value === "original" || value === "1080" || value === "720";
+}
+
+export function isTranscodeMode(value: string): value is TranscodeMode {
+  return value === "transcode" || value === "remux";
 }
 
 let detectedAcceleration: Promise<TranscodeAcceleration> | undefined;
@@ -50,12 +58,27 @@ export function getTranscodeAcceleration(): Promise<TranscodeAcceleration> {
   return detectedAcceleration;
 }
 
-export function transcodeArgs(acceleration: TranscodeAcceleration, segmentFile: string, playlistFile: string, input?: string, start = 0, quality: TranscodeQuality = "1080", subtitleCodec?: string | null): string[] {
-  // When input is an HTTP URL, let ffmpeg read it directly so it can seek and
-  // manage the connection efficiently. Credentials are already embedded in the
-  // URL, so no -headers option is needed. Otherwise pipe raw bytes via stdin.
-  // -ss before -i seeks the input quickly so resume positions are transcoded
-  // immediately instead of waiting for the whole file to process.
+// Builds ffmpeg args for a persistent, absolutely-addressed segment cache.
+//
+// Every segment is named after the absolute source second it begins at
+// (segment-{absSeq}.ts), and the encoder is pinned to a fixed GOP so segment
+// boundaries fall exactly on segSec multiples. Combined with temp_file
+// (segments are written to a .tmp then renamed), the cache can list which
+// segments are complete just by looking at the directory — no partial files.
+// Seeking back into cached territory then serves those segments straight off
+// disk, and the aggregate playlist is rebuilt from the file listing.
+export function transcodeArgs(
+  acceleration: TranscodeAcceleration,
+  segmentFile: string,
+  playlistFile: string,
+  input?: string,
+  start = 0,
+  quality: TranscodeQuality = "1080",
+  subtitleCodec?: string | null,
+  mode: TranscodeMode = "transcode",
+  startNumber = 0,
+  segSec = mode === "remux" ? 10 : 6,
+): string[] {
   const seekArgs = start > 0 ? ["-ss", String(start)] : [];
   const inputArgs = input
     ? [...seekArgs, "-i", input]
@@ -68,22 +91,30 @@ export function transcodeArgs(acceleration: TranscodeAcceleration, segmentFile: 
   // track when we know it is text-based (from the cached probe result).
   const textSubtitle = subtitleCodec ? /^(?:srt|subrip|ass|ssa|webvtt|text|mov_text)$/i.test(subtitleCodec) : false;
   const subtitle = textSubtitle ? ["-map", "0:s:0?", "-c:s", "webvtt"] : [];
-  const video = acceleration === "nvidia"
-    ? [...(scale ? ["-vf", scale] : []), "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p"]
-    : [...(scale ? ["-vf", scale] : []), "-c:v", "libx264", "-preset", "veryfast", "-crf", "21"];
+  const video = mode === "remux"
+    ? ["-c:v", "copy"]
+    : acceleration === "nvidia"
+      ? [...(scale ? ["-vf", scale] : []), "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p"]
+      : [...(scale ? ["-vf", scale] : []), "-c:v", "libx264", "-preset", "veryfast", "-crf", "21"];
+  // Fixed GOP aligned to the segment target: every segSec seconds a keyframe,
+  // so segment boundaries land exactly on segSec multiples and the segment
+  // number is a reliable map of source time. Force it for transcodes; remux
+  // (stream copy) keeps the source GOP, which is already keyframe-based.
+  const gop = mode === "remux" ? [] : ["-g", String(segSec * 25), "-force_key_frames", `expr:gte(t,n_forced*${segSec})`];
   return [
     ...inputArgs,
     "-map", "0:v:0", "-map", "0:a:0?",
     ...subtitle,
     ...video,
+    ...gop,
     "-c:a", "aac", "-b:a", "192k",
-    "-f", "hls", "-hls_time", "4",
-    // Bounded segment window instead of keeping every segment: a 2-hour movie
-    // otherwise leaves ~3-4GB per session on disk (x4 concurrent sessions).
-    // Seeking outside the window restarts the transcode at the target position,
-    // so the player never loses access to old parts of the episode.
-    "-hls_list_size", "60",
-    "-hls_flags", "independent_segments+omit_endlist",
+    "-f", "hls", "-hls_time", String(segSec),
+    // Persistent cache: keep every segment on disk and never trim the playlist
+    // — replaying the same window replays these files without touching the
+    // drive. start_number continues the absolute sequence when appending.
+    "-start_number", String(startNumber),
+    "-hls_list_size", "0",
+    "-hls_flags", "independent_segments+omit_endlist+append_list+temp_file",
     "-hls_segment_filename", segmentFile, playlistFile,
   ];
 }

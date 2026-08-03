@@ -48,13 +48,36 @@ test("quality selects the scale filter", () => {
   assert.ok(!original.includes("-vf"));
 });
 
-test("bounded segment window keeps disk usage in check", () => {
+test("persistent cache keeps all segments and never trims the playlist", () => {
   const args = transcodeArgs("nvidia", "segment.ts", "index.m3u8");
   const flags = args.join(" ");
-  assert.ok(flags.includes("-hls_list_size"));
-  assert.ok(flags.includes("-hls_list_size 60"));
-  assert.ok(!flags.includes("-hls_list_size 0"));
+  // Cache mode: -hls_list_size 0 keeps every segment and the full playlist on
+  // disk so a replayed window is served without touching the source drive.
+  assert.ok(flags.includes("-hls_list_size 0"));
+  // Segments must survive the session (persistent cache), so delete_segments
+  // is intentionally absent.
   assert.ok(!flags.includes("delete_segments"));
+  // Continuation support: appends to the existing playlist and resumes the
+  // segment sequence from start_number.
+  assert.ok(flags.includes("append_list"));
+});
+
+test("remux mode stream-copies the video instead of re-encoding", () => {
+  const args = transcodeArgs("nvidia", "segment.ts", "index.m3u8", undefined, 0, "1080", undefined, "remux");
+  assert.ok(args.includes("-c:v"));
+  assert.ok(args.includes("copy"));
+  assert.ok(!args.includes("h264_nvenc"));
+  assert.ok(!args.includes("libx264"));
+  // Remux keeps a larger segment target; no scale filter is applied.
+  assert.ok(!args.includes("-vf"));
+  assert.ok(args.includes("-hls_time"));
+});
+
+test("remux continues the segment sequence from start_number", () => {
+  const args = transcodeArgs("cpu", "segment.ts", "index.m3u8", undefined, 300, "original", undefined, "remux", 17);
+  assert.deepEqual(args.slice(0, 4), ["-ss", "300", "-i", "pipe:0"]);
+  assert.ok(args.includes("-start_number"));
+  assert.ok(args.includes("17"));
 });
 
 test("text subtitles are mapped into the HLS stream as WebVTT", () => {

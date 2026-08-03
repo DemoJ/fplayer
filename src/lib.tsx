@@ -1,5 +1,15 @@
 import type { Media } from "./api";
 
+// 播放器调试日志：只在开启 debug 时输出，避免生产环境刷控制台。
+// 开启方式：localStorage.setItem("fplayer-debug", "1") 后刷新页面。
+const DEBUG_KEY = "fplayer-debug";
+const debugEnabled = () => typeof localStorage !== "undefined" && localStorage.getItem(DEBUG_KEY) === "1";
+export function playerLog(tag: string, ...args: unknown[]) {
+  if (!debugEnabled()) return;
+  const ts = new Date().toISOString().slice(11, 23);
+  console.log(`%c[${ts}] [${tag}]`, "color:#e8a33d", ...args);
+}
+
 // Sorts a work's episodes across seasons, keeping the largest file when an
 // episode number has multiple versions.
 export function sortEpisodes(media: Media[]): Media[] {
@@ -22,11 +32,37 @@ export function formatTime(seconds: number) {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// HEVC is not decodable in most browsers, so those files always go through
-// transcoding. Other codecs play natively; if the browser still can't decode
-// them, the video error handler falls back to transcoding once.
-export function needsTranscode(codec?: string) {
-  return /hevc|h265|hev1|hvc1/i.test(codec || "");
+// Playback strategy decision, mirroring how Jellyfin/Emby avoid needless
+// transcoding:
+//   direct    – codec AND container are natively playable in the browser
+//               (e.g. h264 in mp4/mov/webm): stream the original file, zero cost.
+//   remux     – codec is playable but the container is not (e.g. h264 in MKV):
+//               ffmpeg -c copy only rewraps the container; runs near-instantly,
+//               no re-encode, negligible encoder/CPU cost.
+//   transcode – codec itself is not decodable in the browser (HEVC/AV1...):
+//               full re-encode (NVENC) with cached output.
+// Unknown codec/container (never probed) falls back to transcode-safe behavior.
+export type PlayStrategy = "direct" | "remux" | "transcode";
+
+export function playbackStrategy(codec?: string, container?: string): PlayStrategy {
+  const c = (codec || "").toLowerCase();
+  const box = (container || "").toLowerCase();
+  // Codecs the browser can decode natively over HLS/file streams.
+  const playableCodec = /^(h264|avc1|vp8|vp9|av01|av1|theora|mp4v|hev1|hvc1|hevc|h265)/.test(c) || !c;
+  if (!playableCodec) return "transcode";
+  // HEVC is borderline: modern Chrome on many GPUs decodes it, but older
+  // setups and Safari-on-iOS variants do not. The server remux path would
+  // produce a stream the browser cannot decode, so re-encode HEVC for safety.
+  if (/hev1|hvc1|hevc|h265/i.test(c)) return "transcode";
+  // Containers the browser plays directly as a file stream.
+  const playableContainer = /^(mp4|m4v|mov|webm|ogv|ogg)$/.test(box) || !box;
+  return playableContainer ? "direct" : "remux";
+}
+
+// Legacy helper kept for the quality-switch back-to-direct check: a stream may
+// only return to direct playback when the file is direct-playable at all.
+export function needsTranscode(codec?: string, container?: string) {
+  return playbackStrategy(codec, container) !== "direct";
 }
 
 export type Quality = "original" | "1080" | "720";

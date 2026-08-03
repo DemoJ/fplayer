@@ -7,13 +7,15 @@ import express from "express";
 import { db } from "./db.js";
 import { config } from "./config.js";
 import { encrypt, hashPassword, hashToken, newSessionToken, signTranscode, verifyPassword, verifyTranscodeSig } from "./security.js";
-import { mediaInputUrl, probe, sourceFile, startCredentialProxy, webdavHeaders, withCredentialProxy } from "./media.js";
-import { activeCount, destroy, ensureDir, fileExists, get, maxConcurrent, owns, register, sweepStaleDirectories } from "./transcodes.js";
+import { mediaInputUrl, probe, sourceFile, acquireCredentialProxy, webdavHeaders, withCredentialProxy, type CredentialProxy } from "./media.js";
+import { activeCount, destroy, get, maxConcurrent, owns, register, activeSessionFor, producedSeq, withLock } from "./transcodes.js";
+import { absSeq, blockHead, buildPlaylist, contiguousFrom, ensureCacheDir, fileExists, listSegments, readMeta, segSecFor, segmentFile, sweepCache, sweepStaleDirectories, touch, writeMeta, REMUX_SEGMENT_SECONDS, TRANSCODE_SEGMENT_SECONDS } from "./transcode-cache.js";
 import { startScan, stopScan } from "./scans.js";
 import { rebuildCatalog } from "./catalog.js";
 import { metadataStatus, startMetadataRefresh, stopMetadataRefresh, checkDoubanLogin, refreshWorkMetadata } from "./metadata.js";
 import { getDoubanSettings, saveDoubanSettings } from "./douban.js";
-import { getTranscodeAcceleration, isTranscodeQuality, transcodeArgs, type TranscodeQuality } from "./ffmpeg.js";
+import { getTranscodeAcceleration, isTranscodeQuality, isTranscodeMode, transcodeArgs, type TranscodeMode, type TranscodeQuality } from "./ffmpeg.js";
+import { log } from "./log.js";
 import type { AuthRequest, Source } from "./types.js";
 
 const app = express(); app.use(express.json());
@@ -315,6 +317,7 @@ app.post("/api/media/:id/probe", auth, openMedia, async (req: AuthRequest, res) 
     const video = (info.streams || []).find((stream: any) => stream.codec_type === "video");
     const audio = (info.streams || []).find((stream: any) => stream.codec_type === "audio");
     const subtitle = (info.streams || []).find((stream: any) => stream.codec_type === "subtitle");
+    log("probe", `media=${media.id} codec=${video?.codec_name} container=${String(info.format?.format_name || "").split(",")[0]} duration=${Number(info.format?.duration) || null}`);
     db.prepare("UPDATE media SET duration=?,container=?,video_codec=?,audio_codec=?,subtitle_codec=? WHERE id=?").run(
       Number(info.format?.duration) || null,
       String(info.format?.format_name || "").split(",")[0] || null,
@@ -462,12 +465,14 @@ app.put("/api/media/:id/progress", auth, (req: AuthRequest, res) => {
   db.prepare("INSERT INTO progress(user_id,media_id,position,duration,completed) VALUES(?,?,?,?,?) ON CONFLICT(user_id,media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,completed=excluded.completed,updated_at=CURRENT_TIMESTAMP").run(req.user!.id, req.params.id, position, duration, completed); res.json({ ok: true });
 });
 async function openMedia(req: AuthRequest, res: express.Response, next: express.NextFunction) {
+  // Accept both `:id` (media routes) and `:mediaId` (transcode segment routes).
+  const id = Number(req.params.id ?? req.params.mediaId);
   // Select source fields explicitly: `s.*` would overwrite m.id with the
   // source id, breaking every downstream use of media.id.
-  const media = db.prepare("SELECT m.id, m.path media_path, m.size media_size, m.source_id, m.subtitle_codec, s.type, s.base_path, s.username, s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1 AND m.trashed=0").get(req.params.id) as any;
+  const media = db.prepare("SELECT m.id, m.path media_path, m.size media_size, m.source_id, m.subtitle_codec, s.type, s.base_path, s.username, s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1 AND m.trashed=0").get(id) as any;
   if (!media) return res.status(404).end(); (req as any).media = media; next();
 }
-app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => { const media = (req as any).media as Source & { media_path: string; media_size: number }; const url = sourceFile(media, media.media_path); const range = req.headers.range; const headers: any = { ...webdavHeaders(media) }; if (range) headers.Range = range; const upstream = media.type === "local" ? null : await fetch(url, { headers }); if (media.type === "local") { res.setHeader("Accept-Ranges", "bytes"); res.sendFile(path.resolve(url)); return; } if (!upstream?.ok && upstream?.status !== 206) { if (upstream?.status === 416 || upstream?.status === 429) { const body = await upstream.text().catch(() => ""); if (upstream.status === 429 || body.includes("429") || body.toLowerCase().includes("too many")) return res.status(429).json({ error: "网盘请求过于频繁，请稍后重试" }); } return res.status(upstream?.status || 502).json({ error: "无法读取媒体文件" }); }   res.status(upstream.status); ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => { const value = upstream.headers.get(header); if (value) res.setHeader(header, value); }); res.setHeader("Content-Disposition", "inline"); // Close the upstream connection when the client disconnects so we don't
+app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => { const media = (req as any).media as Source & { media_path: string; media_size: number }; const url = sourceFile(media, media.media_path); const range = req.headers.range; const headers: any = { ...webdavHeaders(media) }; if (range) headers.Range = range; const upstream = media.type === "local" ? null : await fetch(url, { headers }); if (media.type === "local") { res.setHeader("Accept-Ranges", "bytes"); res.sendFile(path.resolve(url)); return; } if (!upstream?.ok && upstream?.status !== 206) { if (upstream?.status === 416 || upstream?.status === 429) { const body = await upstream.text().catch(() => ""); const throttled = upstream.status === 429 || body.includes("429") || body.toLowerCase().includes("too many"); log("file", `direct stream FAILED media=${media.id} upstream=${upstream?.status} throttled=${throttled} range=${range || "none"}`); if (throttled) return res.status(429).json({ error: "网盘请求过于频繁，请稍后重试" }); } else { log("file", `direct stream FAILED media=${media.id} upstream=${upstream?.status} range=${range || "none"}`); } return res.status(upstream?.status || 502).json({ error: "无法读取媒体文件" }); }   res.status(upstream.status); ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => { const value = upstream.headers.get(header); if (value) res.setHeader(header, value); }); res.setHeader("Content-Disposition", "inline"); // Close the upstream connection when the client disconnects so we don't
   // keep downloading from the WebDAV source after the browser stops reading.
   // Note: cancel() returns a rejected promise when the stream is mid-read
   // (locked by the for-await loop) — the rejection must be swallowed or the
@@ -483,93 +488,229 @@ app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) =>
     }
   } catch {} // upstream cancelled on client disconnect; ignore.
   res.end(); });
-app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, res) => {
-  const media = (req as any).media as Source & { media_path: string; subtitle_codec?: string | null };
-  // Resume position: start transcoding from this offset in the source file so
-  // a resumed episode becomes playable immediately instead of from the top.
-  const start = Math.max(0, Number(req.body?.start) || 0);
-  const quality: TranscodeQuality = isTranscodeQuality(String(req.body?.quality || "")) ? req.body.quality : "1080";
-  if (activeCount() >= maxConcurrent()) return res.status(429).json({ error: "转码并发已满，请稍后再试" });
-  const session = randomUUID();
-  const outputDir = await ensureDir(session);
-  const segFile = path.join(outputDir, "segment-%05d.ts");
+// Shared transcode orchestrator. Starts (or restarts) an ffmpeg producing the
+// absolutely-addressed segment cache for media/quality, serialized per key so
+// concurrent requests (a seek burst, double mounts) can never each spawn their
+// own encoder against the same cache — the main cause of drive rate limiting.
+// Returns the session id and the produced/expected segment numbers.
+type TranscodeHandle = { session: string; outputDir: string; segSec: number; startNumber: number };
+
+async function spawnTranscode(media: any, userId: number, start: number, quality: TranscodeQuality, mode: TranscodeMode, segSec: number): Promise<TranscodeHandle> {
+  const outputDir = await ensureCacheDir(media.id, quality);
+  // 上一轮失败的 error.txt 会误导本轮的启动循环，先清掉。
+  await fs.rm(path.join(outputDir, "error.txt"), { force: true }).catch(() => {});
+  // Remove the previous encoder's playlist: producedSeq reads it to judge how
+  // far the encoder has gotten, and a stale playlist from a prior block would
+  // fool the startup loop into returning before THIS encoder produced anything.
+  await fs.rm(path.join(outputDir, "index.m3u8"), { force: true }).catch(() => {});
+  const startNumber = absSeq(start, segSec);
+  const segFile = path.join(outputDir, "segment-%d.ts");
   const playlistFile = path.join(outputDir, "index.m3u8");
-  // Streaming HLS: keep a sliding window of segments, never finalize the playlist,
-  // so large files start playing after the first segment instead of timing out.
   const acceleration = await getTranscodeAcceleration();
-  // For WebDAV sources, let ffmpeg read the HTTP URL directly instead of piping
-  // through Node.js. This avoids a redundant full-file download (the /file
-  // endpoint may also be requested by the browser) and lets ffmpeg seek via
-  // HTTP Range, which is far more efficient and avoids triggering upstream
-  // rate limits from double-fetching large files. Credentials never land on
-  // the command line: a localhost proxy injects the Authorization header.
+  // WebDAV 源走共享 credential proxy（连接复用），本地源直接读文件。
   let ffmpegInput: string | undefined;
   let localStream: ReadableStream<Uint8Array> | null = null;
-  let credentialProxy: { url: string; close: () => void } | undefined;
+  let credentialProxy: CredentialProxy | undefined;
   const inputAbort = new AbortController();
   if (media.type === "webdav") {
     try {
-      credentialProxy = await startCredentialProxy(media, media.media_path);
+      credentialProxy = await acquireCredentialProxy(media, media.media_path);
       ffmpegInput = credentialProxy.url;
     } catch {
-      return res.status(502).json({ error: "无法建立媒体连接" });
+      throw new Error("无法建立媒体连接");
     }
   } else {
     localStream = fsSync.createReadStream(mediaInputUrl(media, media.media_path)) as unknown as ReadableStream<Uint8Array>;
   }
-  const args = transcodeArgs(acceleration, segFile, playlistFile, ffmpegInput, start, quality, media.subtitle_codec);
+  const args = transcodeArgs(acceleration, segFile, playlistFile, ffmpegInput, start, quality, media.subtitle_codec, mode, startNumber, segSec);
   const child = spawn(config.ffmpeg, args, { stdio: ffmpegInput ? ["ignore", "ignore", "pipe"] : ["pipe", "ignore", "pipe"] });
+  const session = randomUUID();
+  log("transcode", `ffmpeg spawned pid=${child.pid} media=${media.id} start=${start} seq=${startNumber} mode=${mode} accel=${acceleration}`);
   let ffmpegError = ""; child.stderr?.on("data", (chunk) => { ffmpegError = (ffmpegError + chunk).slice(-4000); });
+  register(session, {
+    child, mediaId: media.id, quality, outputDir, userId,
+    lastAccess: Date.now(), inputAbort,
+    closeProxy: credentialProxy?.release,
+    exited: false, start, segSec,
+  });
   if (localStream) {
-    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: localStream, inputAbort, closeProxy: credentialProxy?.close, exited: false });
     const nodeStream = localStream as any;
     nodeStream.pipe(child.stdin, { end: true });
     nodeStream.on("error", () => { try { child.stdin?.end(); } catch {} });
     child.stdin?.on("error", () => {});
-  } else {
-    register(session, { child, outputDir, userId: req.user!.id, lastAccess: Date.now(), inputStream: null, inputAbort, closeProxy: credentialProxy?.close, exited: false });
   }
   child.on("close", (code) => {
-    if (code && !fileExists(playlistFile)) fs.writeFile(path.join(outputDir, "error.txt"), ffmpegError).catch(() => {});
-    // Normal finish (or session kill): finalize the playlist so the player
-    // reaches a proper ended state instead of hanging on a live stream. With
-    // -hls_list_size 0 all segments are kept, so the player can always fetch
-    // its current position.
-    fs.appendFile(playlistFile, "#EXT-X-ENDLIST\n").catch(() => {});
+    const lastError = ffmpegError.slice(-300);
+    if (code) {
+      log("transcode", `ffmpeg exited code=${code} media=${media.id} — ${lastError}`);
+      fs.writeFile(path.join(outputDir, "error.txt"), ffmpegError).catch(() => {});
+    } else {
+      // Natural EOF: the cache is complete, future playbacks hit VOD. Keep the
+      // existing activeStart (the block head), only flip the complete flag.
+      log("transcode", `ffmpeg finished cleanly media=${media.id} (EOF reached) — cache complete`);
+      void readMeta(media.id, quality).then((prev) => writeMeta(media.id, quality, {
+        segSec,
+        activeStart: prev?.activeStart ?? start,
+        complete: true,
+      })).catch(() => {});
+    }
   });
+  return { session, outputDir, segSec, startNumber };
+}
+
+// Serialized "ensure the encoder covers targetSeq": reuse the live session if
+// it is already producing at/after the target and not far ahead; otherwise
+// kill it and restart at the target. When the target is covered by a partial
+// cache (interrupted), the encoder resumes from the cache tail so the
+// already-transcoded prefix is never re-pulled. Returns the active handle plus
+// the aggregate playlist head (the cache block head for the target), which the
+// client uses as its timeline offset.
+async function ensureEncoder(media: any, userId: number, start: number, quality: TranscodeQuality, mode: TranscodeMode, segSec: number, targetSeq: number): Promise<{ handle: TranscodeHandle; playlistStart: number }> {
+  const key = `${media.id}/${quality}`;
+  const existingId = activeSessionFor(key);
+  const segs = await listSegments(media.id, quality);
+  if (existingId) {
+    const existing = get(existingId)!;
+    const produced = await producedSeq(existing.outputDir);
+    const existingStartSeq = absSeq(existing.start, existing.segSec);
+    // Reuse if the target is not behind the session start and the encoder has
+    // not already raced far past it (no point jumping the gun on a restart).
+    if (targetSeq >= existingStartSeq && targetSeq <= produced + 2) {
+      log("transcode", `reuse session media=${media.id} q=${quality} targetSeq=${targetSeq} produced=${produced} startSeq=${existingStartSeq}`);
+      const playlistHead = blockHead(segs, targetSeq);
+      await writeMeta(media.id, quality, { segSec, activeStart: playlistHead * segSec, complete: false });
+      return {
+        handle: { session: existingId, outputDir: existing.outputDir, segSec: existing.segSec, startNumber: absSeq(existing.start, existing.segSec) },
+        playlistStart: playlistHead,
+      };
+    }
+    destroy(existingId);
+  }
+  // Resume from the cache tail: if the target sits inside a partial cache,
+  // start the encoder where it left off, not from the requested position, so
+  // replaying a watched prefix stays free of source traffic.
+  const present = new Set(segs);
+  let resumeSeq = targetSeq;
+  while (present.has(resumeSeq)) resumeSeq++;
+  if (resumeSeq > targetSeq) log("transcode", `resume from cache tail media=${media.id} q=${quality} targetSeq=${targetSeq} tail=${resumeSeq}`);
+  if (activeCount() >= maxConcurrent()) {
+    const err: any = new Error("转码并发已满，请稍后再试");
+    err.status = 429;
+    throw err;
+  }
+  const handle = await spawnTranscode(media, userId, resumeSeq * segSec, quality, mode, segSec);
+  // The aggregate playlist starts at the head of the cache block the target
+  // belongs to (so a backward seek into cached territory is covered), not at
+  // the encoder's resume point. Overwrite the activeStart written by
+  // spawnTranscode with the correct block head.
+  const playlistHead = blockHead(segs, targetSeq);
+  await writeMeta(media.id, quality, { segSec, activeStart: playlistHead * segSec, complete: false });
+  return { handle, playlistStart: playlistHead };
+}
+
+// Reads the current playlist coverage of a cache dir without a live encoder,
+// matching the aggregate playlist's start (activeStart or cache head).
+async function cachedCoverage(mediaId: number, quality: string): Promise<number | null> {
+  const segs = await listSegments(mediaId, quality);
+  if (!segs.length) return null;
+  const meta = await readMeta(mediaId, quality);
+  const segSec = meta?.segSec ?? TRANSCODE_SEGMENT_SECONDS;
+  const startSeq = meta?.complete ? segs[0] : (meta?.activeStart !== undefined ? absSeq(meta.activeStart, segSec) : segs[0]);
+  const seqs = contiguousFrom(segs, startSeq);
+  return (startSeq + seqs.length) * segSec;
+}
+
+app.post("/api/media/:id/transcode", auth, openMedia, async (req: AuthRequest, res) => {
+  const media = (req as any).media as Source & { media_path: string; subtitle_codec?: string | null };
+  const userId = req.user!.id;
+  // Resume position: start transcoding from this offset in the source file so
+  // a resumed episode becomes playable immediately instead of from the top.
+  const start = Math.max(0, Number(req.body?.start) || 0);
+  const quality: TranscodeQuality = isTranscodeQuality(String(req.body?.quality || "")) ? req.body.quality : "1080";
+  const mode: TranscodeMode = isTranscodeMode(String(req.body?.mode || "")) ? req.body.mode : "transcode";
+  const segSec = segSecFor(mode);
+  const targetSeq = absSeq(start, segSec);
+  const key = `${media.id}/${quality}`;
+  const startedAt = Date.now();
+  log("transcode", `request media=${media.id} start=${start} quality=${quality} mode=${mode} segSec=${segSec} targetSeq=${targetSeq} by user=${userId}`);
+  // Fast path: the requested position is fully covered by a COMPLETE cache
+  // (ffmpeg reached EOF last time), so serve the aggregate playlist without
+  // touching the source at all. A partial cache (interrupted mid-stream) must
+  // still spin the encoder back up from its tail — see ensureEncoder.
+  const covered = await withLock(key, async () => {
+    const segs = await listSegments(media.id, quality);
+    if (!segs.length) return null;
+    const meta = await readMeta(media.id, quality);
+    if (!meta?.complete) return null;
+    const s = meta.segSec;
+    const seqs = contiguousFrom(segs, segs[0]);
+    if (segs[0] <= targetSeq && seqs.length * s >= targetSeq * s + s) return seqs.length * s;
+    return null;
+  });
+  if (covered !== null) {
+    touch(media.id, quality).catch(() => {});
+    const playlist = `/api/transcode/${media.id}/${quality}/index.m3u8`;
+    log("transcode", `cache HIT media=${media.id} start=${start} (covered to ${covered}) — serving cached playlist, no ffmpeg`);
+    // start: absolute source position where the playlist begins. The player
+    // offsets its timeline by this, NOT by the requested start — a cache hit
+    // may begin before the resume point.
+    const head = (await listSegments(media.id, quality))[0] ?? targetSeq;
+    return res.json({ session: "", playlist: `${playlist}?sig=${signTranscode(`${media.id}/${quality}`, "index.m3u8")}`, cached: true, start: head * segSec, coveredUntil: covered });
+  }
+  // Fresh or partial cache: (re)start ffmpeg, serialized per media/quality so a
+  // burst of seeks cannot spawn multiple encoders against the same files.
+  let handle: TranscodeHandle;
+  let playlistStart: number;
+  try {
+    ({ handle, playlistStart } = await withLock(key, () => ensureEncoder(media, userId, start, quality, mode, segSec, targetSeq)));
+  } catch (error) {
+    const status = (error as any)?.status;
+    return res.status(status || 500).json({ error: error instanceof Error ? error.message : "转码启动失败" });
+  }
   // If the client disconnects during start-up nothing is playable yet, so stop
   // ffmpeg immediately instead of letting the reaper reclaim it minutes later.
   // (After the playlist is ready the listener is removed below.)
-  const onClientClose = () => destroy(session);
+  const onClientClose = () => destroy(handle.session);
   res.on("close", onClientClose);
+  const playlistUrl = `/api/transcode/${media.id}/${quality}/index.m3u8`;
   const countSegments = async () => {
-    try { return (await fs.readFile(playlistFile, "utf8")).match(/^segment-\d+\.ts/gm)?.length ?? 0; } catch { return 0; }
+    try { return (await fs.readFile(path.join(handle.outputDir, "index.m3u8"), "utf8")).match(/segment-\d+\.ts/g)?.length ?? 0; } catch { return 0; }
   };
   for (let attempt = 0; attempt < 300; attempt++) { // 30s start-up window
-    if (res.destroyed || res.writableEnded) { destroy(session); return; }
-    if (fileExists(playlistFile)) {
-      // Pre-warm: a cold ffmpeg run (WebDAV connect + GPU init + first decode)
-      // is slowest on the very first frames, so hand the stream over only after
-      // a few segments exist. Otherwise the player burns through segment #1 and
-      // stalls waiting for #2 — the "plays a few seconds, then buffers" hiccup.
-      const warmDeadline = Date.now() + 5000;
+    if (res.destroyed || res.writableEnded) { destroy(handle.session); return; }
+    const produced = await producedSeq(handle.outputDir);
+    if (produced >= handle.startNumber) {
+      // Pre-warm: hand the stream over as soon as a couple of segments exist so
+      // startup stays fast — the player's forward buffer absorbs the jitter.
+      const warmDeadline = Date.now() + 4000;
       while (Date.now() < warmDeadline) {
-        if (res.destroyed || res.writableEnded) { destroy(session); return; }
-        if ((await countSegments()) >= 3) break;
+        if (res.destroyed || res.writableEnded) { destroy(handle.session); return; }
+        if ((await countSegments()) >= 2) break;
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       res.off("close", onClientClose);
-      // Sign the manifest URL so native HLS players (iOS Safari, which cannot
-      // set an Authorization header) can fetch the playlist too. hls.js also
-      // works with it: the segment URLs are signed server-side either way.
-      const playlist = `/api/transcode/${session}/index.m3u8`;
-      return res.json({ session, playlist: `${playlist}?sig=${signTranscode(session, "index.m3u8")}` });
+      const segCount = await countSegments();
+      const coverage = await cachedCoverage(media.id, quality);
+      log("transcode", `playlist ready media=${media.id} seq=${produced} segments=${segCount} startupMs=${Date.now() - startedAt}`);
+      // start: the absolute source position the playlist begins at (the cache
+      // block head for the requested position), used by the player as its
+      // timeline offset. NOT the encoder's resume point: older cached segments
+      // may exist before it and are included in the aggregate playlist.
+      const headSec = playlistStart * segSec;
+      return res.json({ session: handle.session, playlist: `${playlistUrl}?sig=${signTranscode(`${media.id}/${quality}`, "index.m3u8")}`, cached: false, start: headSec, coveredUntil: coverage });
     }
-    if (fileExists(path.join(outputDir, "error.txt"))) { destroy(session); return res.status(500).json({ error: "FFmpeg 转码启动失败" }); }
-    if (child.exitCode !== null || child.killed) { destroy(session); return res.status(500).json({ error: "FFmpeg 意外退出" }); }
+    if (fileExists(path.join(handle.outputDir, "error.txt"))) {
+      destroy(handle.session);
+      // 网盘限流时 OpenList 会把夸克返回的 429 包装成 HTTP 416（响应体里
+      // 是 "429|Too Many Requests"），ffmpeg 读源直接失败。
+      const detail = await fs.readFile(path.join(handle.outputDir, "error.txt"), "utf8").catch(() => "");
+      const throttled = /429|Too Many Requests|too many requests|416 Range/i.test(detail);
+      log("transcode", `ffmpeg failed media=${media.id} throttled=${throttled} — ${detail.slice(-300)}`);
+      return res.status(throttled ? 429 : 500).json({ error: throttled ? "网盘请求过于频繁，请稍后重试" : "FFmpeg 转码启动失败" });
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  destroy(session);
+  destroy(handle.session);
   res.status(504).json({ error: "转码启动超时" });
 });
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -592,36 +733,135 @@ app.get("/api/transcode/:session/keepalive", auth, (req: AuthRequest, res) => {
   get(session);
   res.json({ ok: true });
 });
-app.get("/api/transcode/:session/:file", auth, async (req: AuthRequest, res) => {
-  const session = String(req.params.session);
-  if (!UUID_RE.test(session)) return res.status(400).json({ error: "无效的转码会话" });
-  const file = path.basename(String(req.params.file));
-  if (!file || file === "." || file === "..") return res.status(400).end();
-  // Authorize: either the owner of the session, or a valid short-lived signature.
-  const ownerOk = owns(session, req.user!.id);
+// Serves the aggregate playlist and segments of a media/quality cache.
+// Paths are stable across sessions: /api/transcode/{mediaId}/{quality}/... The
+// playlist is generated on the fly from the segments present on disk, so a
+// seek back into already-transcoded territory is served without touching the
+// source drive. Access is via a short-lived signature bound to the cache key.
+app.get("/api/transcode/:mediaId/:quality/index.m3u8", auth, async (req: AuthRequest, res) => {
+  const mediaId = Number(req.params.mediaId);
+  const quality = String(req.params.quality);
+  if (!Number.isInteger(mediaId) || mediaId <= 0) return res.status(400).end();
+  const key = `${mediaId}/${quality}`;
   const sig = typeof req.query.sig === "string" ? req.query.sig : undefined;
-  const sigOk = sig ? verifyTranscodeSig(session, file, sig) : false;
-  if (!ownerOk && !sigOk) return res.status(403).end();
-  get(session); // refresh lastAccess
-  const full = path.join(config.dataDir, "transcodes", session, file);
-  try {
-    await fs.access(full);
-    if (file.endsWith(".m3u8")) {
-      // Rewrite segment URLs to carry a short-lived signature instead of the main
-      // session token, so the token never lands in playlist/segment URLs or logs.
-      const playlist = await fs.readFile(full, "utf8");
-      const rewritten = playlist.replace(/^(segment-.*\.ts)$/gm, (_, seg) => `${seg}?sig=${signTranscode(session, seg)}`);
-      return res.type("application/vnd.apple.mpegurl").send(rewritten);
-    }
-    res.type(path.extname(file));
-    res.sendFile(full);
-  } catch {
-    // Segment not ready yet (streaming HLS): ask the client to retry shortly.
-    if (file.endsWith(".ts")) return res.status(503).set("Retry-After", "1").end();
-    res.status(404).end();
+  if (!sig || !verifyTranscodeSig(key, "index.m3u8", sig)) {
+    log("segment", `rejected sig media=${mediaId} q=${quality} file=index.m3u8 — invalid/expired signature`);
+    return res.status(403).end();
   }
+  touch(mediaId, quality).catch(() => {});
+  const segs = await listSegments(mediaId, quality);
+  if (!segs.length) return res.status(404).end();
+  const meta = await readMeta(mediaId, quality);
+  const segSec = meta?.segSec ?? TRANSCODE_SEGMENT_SECONDS;
+  // The aggregate playlist starts at the encoder's active start (the cache
+  // head for the current playback). Complete caches keep every segment from
+  // the earliest one; a live cache lists only the contiguous run from the
+  // active start, so segments before a forward-seek restart are excluded and
+  // the playlist never contains a hole that hls.js would stall on.
+  const activeStart = meta?.complete ? segs[0] : (meta?.activeStart !== undefined ? absSeq(meta.activeStart, segSec) : segs[0]);
+  const seqs = contiguousFrom(segs, activeStart);
+  // Live edge: whether an encoder is still producing for this cache. If so the
+  // playlist must not carry ENDLIST, so hls.js keeps polling for new segments.
+  const live = Boolean(activeSessionFor(key));
+  const playlist = buildPlaylist(mediaId, quality, seqs, segSec, !live, (file) => signTranscode(key, file));
+  log("segment", `serve playlist media=${mediaId} q=${quality} (${seqs.length} segments, live=${live})`);
+  return res.type("application/vnd.apple.mpegurl").send(playlist);
 });
-app.get(/^(?!\/api).*/, (_req, res) => res.sendFile(path.resolve("dist/index.html")));
+
+// Segment delivery. If the segment already exists (cache hit — including a
+// backward seek into previously transcoded territory), it is served straight
+// off disk. If it does not exist yet, an encoder is (re)started on demand at
+// that position — this is how a forward seek into un-transcoded territory
+// works: the player requests segment N, the server begins encoding at N and
+// returns once the segment is ready, instead of the client orchestrating a
+// full transcode restart itself.
+app.get("/api/transcode/:mediaId/:quality/segment-:seq.ts", auth, openMedia, async (req: AuthRequest, res) => {
+  const media = (req as any).media as Source & { media_path: string; subtitle_codec?: string | null };
+  const mediaId = Number(req.params.mediaId);
+  const quality = String(req.params.quality);
+  const seq = Number(req.params.seq);
+  if (!Number.isInteger(mediaId) || mediaId <= 0 || !Number.isInteger(seq) || seq < 0) return res.status(400).end();
+  const key = `${mediaId}/${quality}`;
+  const sig = typeof req.query.sig === "string" ? req.query.sig : undefined;
+  const file = `segment-${seq}.ts`;
+  if (!sig || !verifyTranscodeSig(key, file, sig)) {
+    log("segment", `rejected sig media=${mediaId} q=${quality} file=${file} — invalid/expired signature`);
+    return res.status(403).end();
+  }
+  touch(mediaId, quality).catch(() => {});
+  const full = segmentFile(mediaId, quality, seq);
+  const serveFile = async () => {
+    try {
+      await fs.access(full);
+    } catch {
+      return false;
+    }
+    res.type("video/mp2t");
+    const fd = await fs.open(full, "r");
+    try {
+      const stat = await fd.stat();
+      if (stat.size === 0) {
+        await fd.close();
+        return res.setHeader("Content-Length", "0").end();
+      }
+      res.setHeader("Content-Length", String(stat.size));
+      const stream = fd.createReadStream({ start: 0, end: stat.size - 1 });
+      const closeFd = () => fd.close().catch(() => {});
+      stream.on("error", () => { closeFd(); res.destroy(); });
+      stream.on("end", closeFd);
+      stream.pipe(res);
+    } catch {
+      fd.close().catch(() => {});
+      res.status(404).end();
+    }
+    return true;
+  };
+  if (await serveFile()) return;
+  // Not cached yet. Serialize the "ensure encoder at this position" decision so
+  // a burst of forward-seek segment requests starts one encoder, not many.
+  const meta = await readMeta(mediaId, quality);
+  const mode: TranscodeMode = meta?.segSec === REMUX_SEGMENT_SECONDS ? "remux" : "transcode";
+  const segSec = meta?.segSec ?? segSecFor(mode);
+  const transcodeQuality: TranscodeQuality = isTranscodeQuality(quality) ? quality : "1080";
+  let handle: TranscodeHandle;
+  try {
+    ({ handle } = await withLock(key, () => ensureEncoder(media, req.user!.id, seq * segSec, transcodeQuality, mode, segSec, seq)));
+  } catch (error) {
+    const status = (error as any)?.status;
+    return res.status(status || 500).json({ error: error instanceof Error ? error.message : "转码启动失败" });
+  }
+  // Poll for the requested segment (and a following one, so the response is not
+  // a half-written file). The encoder may already be running slightly ahead.
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (fileExists(full)) {
+      const next = segmentFile(mediaId, quality, seq + 1);
+      const state = get(handle.session);
+      // Segment is complete once the encoder exited (natural EOF) or the next
+      // segment also exists (temp_file renames make "exists" = "complete").
+      if (state?.exited || fileExists(next)) {
+        return await serveFile() ? undefined : res.status(404).end();
+      }
+    }
+    const state = get(handle.session);
+    if (state?.exited && fileExists(path.join(handle.outputDir, "error.txt"))) {
+      const detail = await fs.readFile(path.join(handle.outputDir, "error.txt"), "utf8").catch(() => "");
+      if (/429|Too Many Requests|too many requests|416 Range/i.test(detail)) {
+        log("segment", `encoder died from rate limit media=${mediaId} q=${quality} seq=${seq} — 429 to player`);
+        return res.status(429).json({ error: "网盘请求过于频繁，请稍后重试" });
+      }
+      return res.status(500).json({ error: "FFmpeg 转码启动失败" });
+    }
+    if (res.destroyed || res.writableEnded) return;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  log("segment", `segment timeout media=${mediaId} q=${quality} seq=${seq} — 503 to player`);
+  return res.status(503).set("Retry-After", "1").end();
+});
+// SPA fallback for client-side routes. Static assets are excluded so a
+// missing CSS/JS file returns a real 404 instead of an HTML page that the
+// browser rejects with a MIME type error.
+app.get(/^(?!\/api)(?!\/assets).*/, (_req, res) => res.sendFile(path.resolve("dist/index.html")));
 // A previous instance may have been killed while a scan or metadata job was
 // running. Mark those as interrupted at real startup (kept out of db.ts so
 // importing modules for tests stays side-effect free).
@@ -629,6 +869,9 @@ db.prepare("UPDATE scan_jobs SET status='failed',phase='interrupted',error='服�
 db.prepare("UPDATE metadata_jobs SET status='failed',phase='interrupted',error='服务重启，匹配已中断',finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')").run();
 rebuildCatalog();
 void sweepStaleDirectories();
+void sweepCache();
+const cacheSweepTimer = setInterval(() => void sweepCache(), 10 * 60 * 1000);
+cacheSweepTimer.unref();
 void purgeExpiredTrash();
 const trashPurgeTimer = setInterval(() => void purgeExpiredTrash(), 24 * 60 * 60 * 1000);
 trashPurgeTimer.unref();

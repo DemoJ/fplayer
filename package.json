@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.server.json && vite build",
     "start": "node dist-server/index.js",
     "test": "rm -rf .test-data && DATA_DIR=./.test-data node --import tsx --test --test-concurrency=1 server/**/*.test.ts; status=$?; rm -rf .test-data; exit $status",
+    "test:e2e": "rm -rf /tmp/fplayer-e2e/data && node --import tsx server/e2e-transcode.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
