@@ -305,7 +305,7 @@ app.get("/api/works", auth, (req: AuthRequest, res) => {
   res.json({ items: rows, total: totalRow.count });
 });
 app.get("/api/works/:id", auth, (req, res) => { const work = db.prepare("SELECT * FROM works WHERE id=?").get(req.params.id); if (!work) return res.status(404).json({ error: "作品不存在" }); const media = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.work_id=? AND m.available=1 AND m.trashed=0 ORDER BY m.season,m.episode,m.size DESC").all((req as AuthRequest).user!.id, req.params.id); res.json({ work, media }); });
-app.get("/api/media/:id", auth, (req: AuthRequest, res) => { const row = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=? AND m.trashed=0").get(req.user!.id, req.params.id); row ? res.json(row) : res.status(404).json({ error: "媒体不存在" }); });
+app.get("/api/media/:id", auth, (req: AuthRequest, res) => { const row = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name,s.type AS source_type FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=? AND m.trashed=0").get(req.user!.id, req.params.id); row ? res.json(row) : res.status(404).json({ error: "媒体不存在" }); });
 // Probes a media file (ffprobe reading the source directly) and caches the
 // codec info in the media row. The player uses this to decide whether the
 // browser can play the file natively or whether it must go through
@@ -326,7 +326,7 @@ app.post("/api/media/:id/probe", auth, openMedia, async (req: AuthRequest, res) 
       subtitle?.codec_name || null,
       media.id,
     );
-    const updated = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=?").get(req.user!.id, media.id);
+    const updated = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name,s.type AS source_type FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=?").get(req.user!.id, media.id);
     res.json({ media: updated });
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : "媒体探测失败" });

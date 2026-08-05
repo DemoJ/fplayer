@@ -32,28 +32,27 @@ export function formatTime(seconds: number) {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// Playback strategy decision, mirroring how Jellyfin/Emby avoid needless
-// transcoding:
-//   direct    – codec AND container are natively playable in the browser
-//               (e.g. h264 in mp4/mov/webm): stream the original file, zero cost.
-//   remux     – codec is playable but the container is not (e.g. h264 in MKV):
-//               ffmpeg -c copy only rewraps the container; runs near-instantly,
-//               no re-encode, negligible encoder/CPU cost.
-//   transcode – codec itself is not decodable in the browser (HEVC/AV1...):
-//               full re-encode (NVENC) with cached output.
-// Unknown codec/container (never probed) falls back to transcode-safe behavior.
+// Playback strategy, mirroring Jellyfin/Emby: remote HTTP/WebDAV sources are
+// always direct-played (the browser issues its own Range requests — one per
+// seek — never touching an ffmpeg encoder against the drive). Transcoding is
+// reserved for local files where the source codec is undecodable. This avoids
+// the catastrophic multi-request pattern ffmpeg exhibits when seeking HTTP
+// inputs with a trailing moov atom (thousands of tiny Range probes that trip
+// drive rate limits).
+//   direct  – stream the original file untouched; browser handles seek/Range.
+//   remux   – container swap only (ffmpeg -c copy against a LOCAL file).
+//   transcode – full re-encode (NVENC) against a LOCAL file.
 export type PlayStrategy = "direct" | "remux" | "transcode";
 
 export function playbackStrategy(codec?: string, container?: string): PlayStrategy {
   const c = (codec || "").toLowerCase();
   const box = (container || "").toLowerCase();
-  // Codecs the browser can decode natively over HLS/file streams.
+  // Codecs a browser may decode natively. HEVC (hvc1/hev1) is included: modern
+  // desktop Chrome with hardware decoding, plus Safari/iOS, handle it. Browsers
+  // that lack HEVC decoding will surface a clean playback error instead of
+  // silently burning the drive with a doomed transcode.
   const playableCodec = /^(h264|avc1|vp8|vp9|av01|av1|theora|mp4v|hev1|hvc1|hevc|h265)/.test(c) || !c;
   if (!playableCodec) return "transcode";
-  // HEVC is borderline: modern Chrome on many GPUs decodes it, but older
-  // setups and Safari-on-iOS variants do not. The server remux path would
-  // produce a stream the browser cannot decode, so re-encode HEVC for safety.
-  if (/hev1|hvc1|hevc|h265/i.test(c)) return "transcode";
   // Containers the browser plays directly as a file stream.
   const playableContainer = /^(mp4|m4v|mov|webm|ogv|ogg)$/.test(box) || !box;
   return playableContainer ? "direct" : "remux";

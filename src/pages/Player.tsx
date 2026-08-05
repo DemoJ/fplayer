@@ -108,8 +108,12 @@ function Player() {
   useEffect(() => {
     if (!item || playMode) return;
     if (item.video_codec) {
-      const strategy = playbackStrategy(item.video_codec, item.container);
-      playerLog("player", `strategy media=${id} codec=${item.video_codec} container=${item.container} → ${strategy}`);
+      // Remote HTTP/WebDAV sources are always direct-played: transcoding them
+      // means ffmpeg opening the remote URL, which for MP4-with-trailing-moov
+      // triggers thousands of tiny Range probes and trips the drive rate limit.
+      // Only local files may go through the transcode/remux path.
+      const strategy = item.source_type && item.source_type !== "local" ? "direct" : playbackStrategy(item.video_codec, item.container);
+      playerLog("player", `strategy media=${id} codec=${item.video_codec} container=${item.container} source=${item.source_type || "?"} → ${strategy}`);
       if (strategy === "transcode") setQuality("1080");
       setMode(strategy === "remux" ? "remux" : "transcode");
       setPlayMode(strategy === "direct" ? "direct" : "hls");
@@ -123,8 +127,8 @@ function Player() {
       .then(({ media }) => {
         if (!active) return;
         setItem(media);
-        const strategy = playbackStrategy(media.video_codec, media.container);
-        playerLog("player", `probed media=${id} codec=${media.video_codec} container=${media.container} → ${strategy}`);
+        const strategy = media.source_type && media.source_type !== "local" ? "direct" : playbackStrategy(media.video_codec, media.container);
+        playerLog("player", `probed media=${id} codec=${media.video_codec} container=${media.container} source=${media.source_type || "?"} → ${strategy}`);
         if (strategy === "transcode") setQuality("1080");
         setMode(strategy === "remux" ? "remux" : "transcode");
         setPlayMode(strategy === "direct" ? "direct" : "hls");
@@ -343,6 +347,17 @@ function Player() {
     // restores the direct stream for a manual retry.
     const code = video.error?.code;
     if (code === MediaError.MEDIA_ERR_NETWORK) { setError("网络错误，请检查连接后重试"); setBuffering(false); return; }
+    // Remote sources are direct-played only: transcoding them means ffmpeg
+    // opening the WebDAV URL, which for MP4-with-trailing-moov triggers
+    // thousands of tiny Range probes and trips the drive rate limit. Fall
+    // back to transcoding solely for LOCAL files.
+    if (item?.source_type && item.source_type !== "local") {
+      playerLog("video", `direct playback failed on remote source media=${id} — not auto-transcoding`);
+      setError(`不支持该视频编码（${item.video_codec?.toUpperCase() || "未知"}）。请使用支持 HEVC 解码的浏览器（桌面 Chrome 硬解 / Safari）播放。`);
+      setBuffering(false);
+      setStatus("");
+      return;
+    }
     void startTranscode(video, item?.position && item.position > 5 ? item.position : 0, quality, mode);
   }
 
@@ -350,8 +365,15 @@ function Player() {
     if (q === quality || !video) return;
     playerLog("player", `switchQuality ${quality} → ${q} media=${id} at ${playback.currentTime.toFixed(1)}s`);
     setQualityMenuOpen(false);
-    const resume = Math.max(0, playback.currentTime + offsetRef.current);
     setQuality(q);
+    // Remote sources are always direct-played; switching quality cannot start
+    // a transcode (that would re-open the WebDAV URL in ffmpeg and re-trigger
+    // the moov-probe rate-limit storm). The original stream is untouched.
+    if (item?.source_type && item.source_type !== "local") {
+      playerLog("player", `switchQuality ignored on remote source media=${id} — staying direct`);
+      return;
+    }
+    const resume = Math.max(0, playback.currentTime + offsetRef.current);
     // remux has no quality ladder (stream copy preserves the source); only
     // transcode can scale. Returning to direct playback is only possible for
     // direct-playable files.
@@ -928,7 +950,7 @@ function Player() {
         {hoverRatio !== null && clampedHoverRatio !== null && <span className="player-timeline-time" style={{ left: `${clampedHoverRatio}%` }}>{formatTime(hoverTime ?? 0)}</span>}
       </div>
       <span className="player-time">{formatTime(playback.currentTime + offsetRef.current)} / {formatTime(playback.duration)}</span>
-      {mode === "transcode" && <div className="player-quality-wrap">
+      {mode === "transcode" && !(item?.source_type && item.source_type !== "local") && <div className="player-quality-wrap">
         <button className="player-btn quality-btn" type="button" onClick={(e) => { e.currentTarget.blur(); setQualityMenuOpen((open) => !open); }}>{QUALITY_ICON}<span>{QUALITY_LABEL[quality]}</span></button>
         {qualityMenuOpen && <div className="player-quality-menu">{(Object.keys(QUALITY_LABEL) as Quality[]).map((q) => <button key={q} className={q === quality ? "active" : ""} type="button" onClick={() => void switchQuality(q)}>{QUALITY_LABEL[q]}{q === "original" ? " · 原分辨率" : ""}</button>)}</div>}
       </div>}
