@@ -909,6 +909,15 @@ function Player() {
         // is the way back in, so repeated error events don't spin up endless
         // new transcode sessions against the upstream drive.
         if (video?.dataset.transcoding === "failed") return;
+        // Direct-stream (remote WebDAV) 失败：清空 src 阻止浏览器立即自动重试
+        // （浏览器 <video> 失败后会在毫秒级重打 src，十几次/秒，把网盘限流越
+        // 拖越重）。不主动发起任何重试，只显示错误，等用户手动点击"重试"或刷
+        // 新页面后再请求，给网盘限流窗口自然冷却的时间。
+        if (playMode === "direct") {
+          if (video) { video.removeAttribute("src"); video.load(); }
+          setError("播放失败，请稍后点击重试"); setBuffering(false); setStatus("");
+          return;
+        }
         transcode();
       }}
     />

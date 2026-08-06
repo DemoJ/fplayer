@@ -203,11 +203,28 @@ async function startCredentialProxy(source: Source, mediaPath: string): Promise<
         res.writeHead(up.status, out);
         if (up.body) {
           const reader = up.body.getReader();
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value && !res.write(Buffer.from(value))) await new Promise((resolve) => res.once("drain", resolve));
-          }
+          // Stop reading the upstream the moment the downstream (ffmpeg) goes
+          // away. Without this, an aborted transcode keeps pulling data from
+          // the drive until the whole file is drained - burning drive traffic
+          // and deepening rate limits for a session nobody is watching.
+          const onAbort = () => { try { reader.cancel().catch(() => {}); } catch {} };
+          res.on("close", onAbort);
+          // Drain-wait with full listener cleanup so repeated backpressure does
+          // not leak `close`/`drain` listeners on the downstream response.
+          const waitForDrain = () => new Promise<void>((resolve) => {
+            const done = () => { res.off("drain", done); res.off("close", done); resolve(); };
+            res.on("drain", done);
+            res.on("close", done);
+          });
+          try {
+            while (true) {
+              if (res.destroyed || res.writableEnded) break;
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value && !res.write(Buffer.from(value))) await waitForDrain();
+            }
+          } catch {} // downstream cancelled; ignore.
+          res.off("close", onAbort);
         }
         res.end();
       })

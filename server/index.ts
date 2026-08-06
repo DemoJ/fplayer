@@ -472,22 +472,71 @@ async function openMedia(req: AuthRequest, res: express.Response, next: express.
   const media = db.prepare("SELECT m.id, m.path media_path, m.size media_size, m.source_id, m.subtitle_codec, s.type, s.base_path, s.username, s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1 AND m.trashed=0").get(id) as any;
   if (!media) return res.status(404).end(); (req as any).media = media; next();
 }
-app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => { const media = (req as any).media as Source & { media_path: string; media_size: number }; const url = sourceFile(media, media.media_path); const range = req.headers.range; const headers: any = { ...webdavHeaders(media) }; if (range) headers.Range = range; const upstream = media.type === "local" ? null : await fetch(url, { headers }); if (media.type === "local") { res.setHeader("Accept-Ranges", "bytes"); res.sendFile(path.resolve(url)); return; } if (!upstream?.ok && upstream?.status !== 206) { if (upstream?.status === 416 || upstream?.status === 429) { const body = await upstream.text().catch(() => ""); const throttled = upstream.status === 429 || body.includes("429") || body.toLowerCase().includes("too many"); log("file", `direct stream FAILED media=${media.id} upstream=${upstream?.status} throttled=${throttled} range=${range || "none"}`); if (throttled) return res.status(429).json({ error: "网盘请求过于频繁，请稍后重试" }); } else { log("file", `direct stream FAILED media=${media.id} upstream=${upstream?.status} range=${range || "none"}`); } return res.status(upstream?.status || 502).json({ error: "无法读取媒体文件" }); }   res.status(upstream.status); ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => { const value = upstream.headers.get(header); if (value) res.setHeader(header, value); }); res.setHeader("Content-Disposition", "inline"); // Close the upstream connection when the client disconnects so we don't
-  // keep downloading from the WebDAV source after the browser stops reading.
-  // Note: cancel() returns a rejected promise when the stream is mid-read
-  // (locked by the for-await loop) — the rejection must be swallowed or the
-  // process dies from an unhandled rejection.
-  const onClose = () => { try { upstream.body?.cancel().catch(() => {}); } catch {} }; res.on("close", onClose);
-  // When the client disconnects mid-write, `drain` never fires and an await on
-  // it alone would hang the request forever. Resolve on `close` as well.
-  const waitForDrain = () => new Promise<void>((resolve) => { res.once("drain", resolve); res.once("close", resolve); });
+app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => {
+  const media = (req as any).media as Source & { media_path: string; media_size: number; source_id: number };
+  const url = sourceFile(media, media.media_path);
+  const range = req.headers.range;
+  // Local files: send straight from disk. No upstream throttle concern.
+  if (media.type === "local") {
+    res.setHeader("Accept-Ranges", "bytes");
+    res.sendFile(path.resolve(url));
+    return;
+  }
+  // Remote (WebDAV): fetch upstream and pipe through. No circuit breaker -
+  // when the drive throttles, just fail this one request and let the client
+  // decide. The frontend clears <video src> on error so the browser does NOT
+  // auto-retry (which would hammer the drive dozens of times per second and
+  // deepen the throttle). A user-initiated retry (refresh / re-click) is the
+  // only thing that re-hits the upstream, by design.
+  const headers: Record<string, string> = { ...webdavHeaders(media) };
+  if (range) headers.Range = range;
+  const upstream = await fetch(url, { headers });
+  // Non-2xx/206: classify and translate. The drive (夸克 via OpenList) wraps
+  // its 429 throttles as HTTP 416 with a "429|Too Many Requests" body. A bare
+  // 416 without that body is a genuine "Range Not Satisfiable" and must NOT be
+  // treated as throttle.
+  if (!upstream?.ok && upstream?.status !== 206) {
+    const status = upstream?.status || 502;
+    let throttled = status === 429;
+    if (status === 416 || status === 429) {
+      const body = await upstream.text().catch(() => "");
+      throttled = status === 429 || body.includes("429") || body.toLowerCase().includes("too many");
+    }
+    log("file", `direct stream FAILED media=${media.id} upstream=${status} throttled=${throttled} range=${range || "none"}`);
+    if (throttled) return res.status(429).json({ error: "网盘请求过于频繁，请稍后重试" });
+    // Genuine non-throttle failure (403/404/416-range/5xx): return as-is so the
+    // browser stops retrying a genuinely unreadable file instead of hammering.
+    return res.status(status).json({ error: "无法读取媒体文件" });
+  }
+  res.status(upstream.status);
+  ["content-type", "content-length", "content-range", "accept-ranges"].forEach((header) => {
+    const value = upstream.headers.get(header);
+    if (value) res.setHeader(header, value);
+  });
+  res.setHeader("Content-Disposition", "inline");
+  // Pipe the upstream body to the client with correct backpressure and FULL
+  // listener cleanup. The previous implementation leaked a `close` listener on
+  // every backpressure wait (res.once("close") without removal), which tripped
+  // MaxListenersExceededWarning on large streams and left stale handlers that
+  // could fire after the response was reused.
+  const onClose = () => { try { upstream.body?.cancel().catch(() => {}); } catch {} };
+  res.on("close", onClose);
+  // A single drain-wait promise whose listeners are removed once it resolves,
+  // so repeated backpressure never accumulates listeners on `res`.
+  const waitForDrain = () => new Promise<void>((resolve) => {
+    const done = () => { res.off("drain", done); res.off("close", done); resolve(); };
+    res.on("drain", done);
+    res.on("close", done);
+  });
   try {
     if (upstream.body) for await (const chunk of upstream.body) {
-      if (res.destroyed) break;
+      if (res.destroyed || res.writableEnded) break;
       if (!res.write(chunk)) await waitForDrain();
     }
   } catch {} // upstream cancelled on client disconnect; ignore.
-  res.end(); });
+  res.off("close", onClose);
+  try { res.end(); } catch {}
+});
 // Shared transcode orchestrator. Starts (or restarts) an ffmpeg producing the
 // absolutely-addressed segment cache for media/quality, serialized per key so
 // concurrent requests (a seek burst, double mounts) can never each spawn their
