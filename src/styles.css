@@ -113,7 +113,12 @@
 /* Hide the cursor while idle and the chrome is hidden; any mouse move brings it back. */
 .player-page:not(.chrome-visible):not(:focus-within) { cursor: none; }
 .player-back { position: relative; flex: 0 0 auto; width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 50%; background: #ffffff14; color: #fff; padding: 0; cursor: pointer; pointer-events: auto; backdrop-filter: blur(12px); transition: background .2s ease, transform .2s ease; }
-.player-back span { display: block; margin-top: -3px; font: 300 2rem/1 system-ui, sans-serif; }
+.player-back span {
+  display: block;
+  font: 300 2rem/1 system-ui, sans-serif;
+  transform: translateY(-2px);
+}
+
 .player-back:hover { background: #ffffff28; transform: translateX(-2px); }
 .player-heading { min-width: 0; padding-top: 3px; text-shadow: 0 2px 12px #000; }
 .player-heading small, .player-heading strong { display: block; }
