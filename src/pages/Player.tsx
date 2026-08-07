@@ -428,10 +428,10 @@ function Player() {
     // playback persisting well past a user seek, may mark the media completed.
     // A pending seek check also blocks completion: the position may still be
     // the live-edge snap rather than where the user actually dragged.
-    // Completion line: the last 2% (Netflix-style) — a 45-min episode counts
-    // as watched once under ~54s remain.
+    // Completion line: the last 5% — a 45-min episode counts as watched once
+    // under ~2m15s remain.
     const watchedThrough = remaining < 2 || Date.now() - lastUserSeekRef.current > 30000;
-    const completed = reliable && remaining <= duration * 0.02 && watchedThrough && pendingSeekTimerRef.current === undefined;
+    const completed = reliable && remaining <= duration * 0.05 && watchedThrough && pendingSeekTimerRef.current === undefined;
     api(`/media/${id}/progress`, { method: "PUT", body: JSON.stringify({ position: Math.min(position, duration), duration, completed }) }).catch(() => {});
   }
 
