@@ -107,12 +107,18 @@ function Player() {
   // decode it — the main cause of full-file downloads and drive rate limits.
   useEffect(() => {
     if (!item || playMode) return;
+    // Remote HTTP/WebDAV sources are always direct-played: transcoding them
+    // means ffmpeg opening the remote URL, which for MP4-with-trailing-moov
+    // triggers thousands of tiny Range probes and trips the drive rate limit.
+    // The probe result can't change that, so skip probing entirely instead of
+    // paying an ffprobe round-trip (often a 30s timeout) on every visit.
+    if (item.source_type && item.source_type !== "local") {
+      playerLog("player", `strategy media=${id} source=${item.source_type} → direct (remote)`);
+      setPlayMode("direct");
+      return;
+    }
     if (item.video_codec) {
-      // Remote HTTP/WebDAV sources are always direct-played: transcoding them
-      // means ffmpeg opening the remote URL, which for MP4-with-trailing-moov
-      // triggers thousands of tiny Range probes and trips the drive rate limit.
-      // Only local files may go through the transcode/remux path.
-      const strategy = item.source_type && item.source_type !== "local" ? "direct" : playbackStrategy(item.video_codec, item.container);
+      const strategy = playbackStrategy(item.video_codec, item.container);
       playerLog("player", `strategy media=${id} codec=${item.video_codec} container=${item.container} source=${item.source_type || "?"} → ${strategy}`);
       if (strategy === "transcode") setQuality("1080");
       setMode(strategy === "remux" ? "remux" : "transcode");
@@ -127,7 +133,7 @@ function Player() {
       .then(({ media }) => {
         if (!active) return;
         setItem(media);
-        const strategy = media.source_type && media.source_type !== "local" ? "direct" : playbackStrategy(media.video_codec, media.container);
+        const strategy = playbackStrategy(media.video_codec, media.container);
         playerLog("player", `probed media=${id} codec=${media.video_codec} container=${media.container} source=${media.source_type || "?"} → ${strategy}`);
         if (strategy === "transcode") setQuality("1080");
         setMode(strategy === "remux" ? "remux" : "transcode");
