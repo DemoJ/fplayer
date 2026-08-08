@@ -427,7 +427,10 @@ function Player() {
     lastSavedRef.current = now;
     // A live transcode stream reports a duration that tracks the downloaded
     // window, so completion can only be judged against a trusted duration.
-    const reliable = probedDuration !== undefined || Math.abs(element.duration - position) < 60;
+    // Direct playback reports the full source duration natively — trusted even
+    // without a probe (remote sources skip probing) — so only HLS streams
+    // still need the near-end distance check.
+    const reliable = probedDuration !== undefined || playMode !== "hls" || Math.abs(element.duration - position) < 60;
     const remaining = duration - position;
     // Dragging the timeline into the final stretch is not the same as watching
     // it through: only playback that actually reaches the very end, or natural
