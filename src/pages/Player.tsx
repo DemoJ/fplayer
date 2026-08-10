@@ -596,7 +596,8 @@ function Player() {
     chromeTimerRef.current = window.setTimeout(() => {
       chromeTimerRef.current = undefined;
       // Keep the bar up while the cursor sits on it; hide only otherwise.
-      if (video && !video.paused && !controlsHoverRef.current) setChromeVisible(false);
+      // 全屏暂停时也自动隐藏控制栏（便于全屏截图）；非全屏暂停保留控制栏。
+      if (video && !controlsHoverRef.current && (video.paused ? document.fullscreenElement : true)) setChromeVisible(false);
     }, 2600);
   }
 
@@ -870,7 +871,7 @@ function Player() {
       onPause={() => {
         playerLog("buffer", `pause media=${id} at ${video?.currentTime?.toFixed(1) ?? "?"}s`);
         if (video) save(video);
-        setChromeVisible(true);
+        showChrome();
         setPlayback((p) => ({ ...p, playing: false }));
         // 长时间暂停时销毁转码会话，避免 ffmpeg 继续全速拉流烧网盘流量。
         if (playMode === "hls" && transcodeSessionRef.current) {
