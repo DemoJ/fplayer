@@ -110,6 +110,9 @@
 .player-page { position: fixed; inset: 0; width: 100vw; height: 100dvh; min-height: 0; overflow: hidden; }
 .player-chrome { position: absolute; z-index: 5; inset: 0 0 auto; min-height: 118px; display: flex; align-items: flex-start; gap: 13px; padding: calc(18px + env(safe-area-inset-top)) calc(22px + env(safe-area-inset-right)) 38px calc(18px + env(safe-area-inset-left)); background: linear-gradient(180deg, #000d 0%, #0008 42%, transparent 100%); opacity: 0; transform: translateY(-8px); pointer-events: none; transition: opacity .25s ease, transform .25s ease; }
 .player-page.chrome-visible .player-chrome, .player-page:focus-within .player-chrome { opacity: 1; transform: translateY(0); }
+/* 截屏成功闪光反馈 */
+.player-screenshot-flash { position: absolute; inset: 0; z-index: 9; background: #fff; pointer-events: none; animation: player-flash .35s ease-out forwards; }
+@keyframes player-flash { from { opacity: .9; } to { opacity: 0; } }
 /* Hide the cursor while idle and the chrome is hidden; any mouse move brings it back. */
 .player-page:not(.chrome-visible):not(:focus-within) { cursor: none; }
 .player-back { position: relative; flex: 0 0 auto; width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 50%; background: #ffffff14; color: #fff; padding: 0; cursor: pointer; pointer-events: auto; backdrop-filter: blur(12px); transition: background .2s ease, transform .2s ease; }

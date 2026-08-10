@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Hls from "hls.js";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, getToken, type Media, type Work } from "../api";
-import { formatTime, FULLSCREEN_EXIT_ICON, FULLSCREEN_ICON, MUTED_ICON, PAUSE_ICON, PLAY_ICON, playbackStrategy, playerLog, QUALITY_ICON, QUALITY_LABEL, SKIP_NEXT_ICON, SKIP_PREV_ICON, sortEpisodes, VOLUME_ICON, type Quality } from "../lib";
+import { formatTime, FULLSCREEN_EXIT_ICON, FULLSCREEN_ICON, MUTED_ICON, PAUSE_ICON, PLAY_ICON, playbackStrategy, playerLog, QUALITY_ICON, QUALITY_LABEL, SCREENSHOT_ICON, SKIP_NEXT_ICON, SKIP_PREV_ICON, sortEpisodes, VOLUME_ICON, type Quality } from "../lib";
 
 export function PlayerRoute() {
   const { id } = useParams();
@@ -22,6 +22,8 @@ function Player() {
   const [playback, setPlayback] = useState({ currentTime: 0, duration: 0, buffered: 0, volume: 1, muted: false, playing: false });
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  // 截屏成功时的白色闪光反馈，短暂淡出。
+  const [screenshotFlash, setScreenshotFlash] = useState(0);
   const [playMode, setPlayMode] = useState<"direct" | "hls" | null>(null);
   // Whether the HLS stream is a full re-encode (transcode) or a container-only
   // remux (h264 in MKV). Both are served as HLS; only transcode honors quality.
@@ -819,6 +821,44 @@ function Player() {
     if (document.fullscreenElement) void document.exitFullscreen();
     else void document.documentElement.requestFullscreen();
   }
+  function takeScreenshot() {
+    if (!video || !video.videoWidth || !video.videoHeight) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0);
+    // 字幕随截图一起保存：按播放时相同的底部居中样式绘制到画面上。
+    if (subtitles.enabled && subtitleText) {
+      const fontSize = Math.max(16, Math.round(video.videoHeight * 0.045));
+      const lineHeight = fontSize * 1.4;
+      const margin = Math.max(8, Math.round(video.videoHeight * 0.03));
+      const lines = subtitleText.split(/\r?\n/);
+      const blockY = video.videoHeight - lineHeight * lines.length - margin;
+      ctx.font = `600 ${fontSize}px system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      lines.forEach((line, i) => {
+        const w = ctx.measureText(line).width;
+        const y = blockY + i * lineHeight + lineHeight / 2;
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fillRect(canvas.width / 2 - w / 2 - fontSize * 0.3, y - lineHeight / 2, w + fontSize * 0.6, lineHeight);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(line, canvas.width / 2, y);
+      });
+    }
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${item?.title || "fplayer"}-${formatTime(playback.currentTime + offsetRef.current).replace(/:/g, "-")}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }, "image/png");
+    setScreenshotFlash(Date.now());
+  }
   function timeFromPointer(event: { clientX: number }) {
     const el = timelineRef.current;
     const duration = item?.duration && item.duration > 0 ? item.duration : playback.duration;
@@ -936,6 +976,7 @@ function Player() {
         {seekHint.dir === "fwd" ? "+5秒" : seekHint.dir === "back" ? "-5秒" : seekHint.dir === "fast" ? "快进 2倍速" : "快退 0.5倍速"}
       </div>
     )}
+    {screenshotFlash > 0 && <div className="player-screenshot-flash" key={screenshotFlash} />}
     {subtitles.enabled && subtitleText && <div className="player-subtitle">{subtitleText}</div>}
     <div className={`player-controls ${chromeVisible ? "visible" : ""}`}
       onMouseEnter={() => { controlsHoverRef.current = true; if (chromeTimerRef.current) { window.clearTimeout(chromeTimerRef.current); chromeTimerRef.current = undefined; } }}
@@ -978,6 +1019,7 @@ function Player() {
         {rateMenuOpen && <div className="player-quality-menu">{[0.5, 0.75, 1, 1.25, 1.5, 2].map((r) => <button key={r} className={r === rate ? "active" : ""} type="button" onClick={() => setPlaybackRate(r)}>{r === 1 ? "1x 正常" : `${r}x`}</button>)}</div>}
       </div>
       {subtitles.available && <button className={`player-btn ${subtitles.enabled ? "on" : ""}`} type="button" aria-pressed={subtitles.enabled} title={subtitles.enabled ? "关闭字幕" : "开启字幕"} onClick={(e) => { e.currentTarget.blur(); toggleSubtitles(); }}>CC</button>}
+      <button className="player-btn" type="button" aria-label="截屏" title="截屏（保存当前画面为 PNG）" onClick={(e) => { e.currentTarget.blur(); takeScreenshot(); }}>{SCREENSHOT_ICON}</button>
       <button className="player-btn" type="button" aria-label={fullscreen ? "退出全屏" : "全屏"} onClick={(e) => { e.currentTarget.blur(); toggleFullscreen(); }}>{fullscreen ? FULLSCREEN_EXIT_ICON : FULLSCREEN_ICON}</button>
     </div>
     {buffering && !error && <div className="player-status" role="status"><i className="player-spinner" /><strong>{status || "正在缓冲"}</strong></div>}
