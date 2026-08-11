@@ -14,12 +14,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -48,13 +52,31 @@ private fun mediaProgress(media: Media): Float? {
     return (position / duration).toFloat()
 }
 
+/** `remember` 一个 FocusRequester 并挂到卡片上；卡片聚焦时记入 [lastFocusedCard]。 */
 @Composable
-fun HomeScreen(onPlay: (Long) -> Unit) {
+private fun rememberFocusedCardModifier(lastFocusedCard: MutableState<FocusRequester?>): Modifier {
+    val requester = remember { FocusRequester() }
+    return Modifier
+        .focusRequester(requester)
+        .onFocusChanged { if (it.isFocused) lastFocusedCard.value = requester }
+}
+
+@Composable
+fun HomeScreen(
+    onPlay: (Long) -> Unit,
+    restoreTick: Int = 0,
+) {
     val api = AppContainer.apiClient.api
     var continued by remember { mutableStateOf<List<Media>>(emptyList()) }
     var upNext by remember { mutableStateOf<List<UpNext>>(emptyList()) }
     var recent by remember { mutableStateOf<List<Media>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
+
+    // 记录最后聚焦的卡片；restoreTick 变化（播放返回）时把焦点还给它。
+    val lastFocusedCard = remember { mutableStateOf<FocusRequester?>(null) }
+    LaunchedEffect(restoreTick) {
+        if (restoreTick > 0) lastFocusedCard.value?.requestFocus()
+    }
 
     LaunchedEffect(Unit) {
         val result = coroutineScope {
@@ -115,6 +137,7 @@ fun HomeScreen(onPlay: (Long) -> Unit) {
                     progress = mediaProgress(media),
                     fallbackText = media.title,
                     onClick = { onPlay(media.id) },
+                    modifier = rememberFocusedCardModifier(lastFocusedCard),
                 )
             }
             Spacer(Modifier.height(20.dp))
@@ -127,6 +150,7 @@ fun HomeScreen(onPlay: (Long) -> Unit) {
                     subtitle = "下一集 S${pad(item.season)}E${pad(item.episode)}",
                     fallbackText = item.workTitle,
                     onClick = { onPlay(item.id) },
+                    modifier = rememberFocusedCardModifier(lastFocusedCard),
                 )
             }
             Spacer(Modifier.height(20.dp))
@@ -139,6 +163,7 @@ fun HomeScreen(onPlay: (Long) -> Unit) {
                     subtitle = mediaSubtitle(media),
                     fallbackText = media.title,
                     onClick = { onPlay(media.id) },
+                    modifier = rememberFocusedCardModifier(lastFocusedCard),
                 )
             }
             Spacer(Modifier.height(32.dp))

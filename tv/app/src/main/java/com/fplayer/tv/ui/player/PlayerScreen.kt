@@ -24,6 +24,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +44,9 @@ import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Button
 import com.fplayer.tv.core.AppContainer
 import kotlin.math.roundToLong
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private fun formatTime(ms: Long): String {
     val total = (ms.coerceAtLeast(0) / 1000).toInt()
@@ -75,6 +79,22 @@ fun PlayerScreen(
     val videoFocus = remember { FocusRequester() }
     val menuFocus = remember { FocusRequester() }
 
+    // 控制条自动隐藏：播放中无操作 4 秒后隐藏；暂停/缓冲/出错/菜单打开时保持显示。
+    var controlsVisible by remember { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
+    var hideJob by remember { mutableStateOf<Job?>(null) }
+
+    fun showControls(autoHide: Boolean) {
+        controlsVisible = true
+        hideJob?.cancel()
+        if (autoHide) {
+            hideJob = scope.launch {
+                delay(4000)
+                controlsVisible = false
+            }
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose { controller.release() }
     }
@@ -82,6 +102,10 @@ fun PlayerScreen(
     LaunchedEffect(Unit) { videoFocus.requestFocus() }
     LaunchedEffect(menuOpen) {
         if (menuOpen) menuFocus.requestFocus()
+    }
+    // 进入播放页先显示控制条；播放状态变化时按需重新调度自动隐藏。
+    LaunchedEffect(state.playing, state.buffering, state.error, menuOpen) {
+        showControls(autoHide = !menuOpen && state.error.isBlank() && state.playing && !state.buffering)
     }
     // 播放期间保持屏幕常亮
     DisposableEffect(Unit) {
@@ -103,8 +127,12 @@ fun PlayerScreen(
             .focusRequester(videoFocus)
             .focusable()
             .onPreviewKeyEvent { event ->
-                if (menuOpen) return@onPreviewKeyEvent false
                 if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onPreviewKeyEvent false
+                // 任何按键都重新显示控制条并重置自动隐藏计时（菜单打开时由面板接管）。
+                if (!menuOpen) {
+                    showControls(autoHide = state.error.isBlank() && state.playing && !state.buffering)
+                }
+                if (menuOpen) return@onPreviewKeyEvent false
                 when (event.nativeKeyEvent.keyCode) {
                     KeyEvent.KEYCODE_DPAD_CENTER,
                     KeyEvent.KEYCODE_ENTER,
@@ -136,18 +164,19 @@ fun PlayerScreen(
         )
 
         // 顶部信息条
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .fillMaxWidth()
-                .background(
-                    androidx.compose.ui.graphics.Brush.verticalGradient(
-                        0f to Color(0xB3000000),
-                        1f to Color.Transparent,
-                    ),
-                )
-                .padding(start = 36.dp, top = 24.dp, end = 36.dp, bottom = 40.dp),
-        ) {
+        if (controlsVisible) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxWidth()
+                    .background(
+                        androidx.compose.ui.graphics.Brush.verticalGradient(
+                            0f to Color(0xB3000000),
+                            1f to Color.Transparent,
+                        ),
+                    )
+                    .padding(start = 36.dp, top = 24.dp, end = 36.dp, bottom = 40.dp),
+            ) {
             Text(
                 text = "← 返回",
                 color = Color(0xCCFFFFFF),
@@ -172,8 +201,10 @@ fun PlayerScreen(
                 )
             }
         }
+        }
 
         // 底部控制条：进度 + 时间 + 状态
+        if (controlsVisible) {
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -237,6 +268,7 @@ fun PlayerScreen(
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 10.dp),
             )
+        }
         }
 
         if (state.buffering) {

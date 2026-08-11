@@ -1,7 +1,5 @@
 package com.fplayer.tv.ui.common
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -17,13 +15,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -31,8 +27,8 @@ import androidx.compose.ui.unit.sp
 import com.fplayer.tv.data.Work
 
 /**
- * 媒体库网格卡片：2:3 海报 + 标题 + 副标题，焦点放大 + 高亮边框。
- * 宽度自适应所在网格列。
+ * 媒体库网格卡片：2:3 海报 + 标题 + 副标题，焦点时海报叠加高亮描边，
+ * 卡片与文字不做缩放，保持布局稳定。
  */
 @Composable
 fun WorkCard(
@@ -42,11 +38,6 @@ fun WorkCard(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.07f else 1f,
-        animationSpec = tween(150),
-        label = "workCardScale",
-    )
     val subtitle = if (work.kind == "show") {
         "共 ${work.seasonCount} 季"
     } else {
@@ -59,18 +50,7 @@ fun WorkCard(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick,
-            )
-            .then(
-                if (focused) {
-                    Modifier.border(2.dp, Color(0xFFE4322D), RoundedCornerShape(10.dp))
-                } else {
-                    Modifier
-                }
-            )
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            },
+            ),
     ) {
         Box(
             modifier = Modifier
@@ -83,6 +63,13 @@ fun WorkCard(
                 modifier = Modifier.fillMaxSize(),
                 fallbackText = work.title,
             )
+            if (focused) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .border(2.5.dp, Color(0xE6FFFFFF), RoundedCornerShape(10.dp)),
+                )
+            }
         }
         Text(
             text = work.title,
