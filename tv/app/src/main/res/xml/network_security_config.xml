@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TV 端以局域网自托管服务为目标，允许明文 HTTP（fplayer 服务端默认无 TLS）。
+     生产级部署若启用了 HTTPS 可收紧为域名白名单。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

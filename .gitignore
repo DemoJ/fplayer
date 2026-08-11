@@ -5,3 +5,24 @@ data/
 .test-data/
 .env
 *.log
+test-media/
+
+# TV (Android / Gradle / Kotlin)
+tv/.gradle/
+tv/build/
+tv/app/build/
+tv/.idea/
+tv/.kotlin/
+tv/local.properties
+tv/**/*.iml
+tv/captures/
+tv/.externalNativeBuild/
+tv/.cxx/
+tv/**/*.apk
+tv/**/*.aab
+tv/**/*.ap_
+tv/**/*.dex
+tv/**/*.keystore
+tv/**/*.jks
+tv/gen/
+tv/out/
