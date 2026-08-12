@@ -7,6 +7,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,65 +26,62 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.fplayer.tv.data.Source
 
 /**
- * 横排媒体卡片：2:3 海报 + 标题/副标题 + 可选观看进度条。
- * 遥控器焦点时在海报上叠加高亮描边，卡片与文字不做缩放，保持布局稳定。
+ * 媒体源卡片：类型角标 + 文件数 + 名称，点击进入该媒体源的目录浏览。
  */
 @Composable
-fun MediaCard(
-    imagePath: String?,
-    title: String,
-    subtitle: String? = null,
-    progress: Float? = null,
-    fallbackText: String? = null,
-    onClick: (() -> Unit)? = null,
+fun SourceCard(
+    source: Source,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
-    val cardWidth = 190.dp
-    val cardHeight = 285.dp
-    val clickableModifier = if (onClick != null) {
-        Modifier
+    val isWebdav = source.type == "webdav"
+    Column(
+        modifier = modifier
+            .width(300.dp)
             .clip(RoundedCornerShape(10.dp))
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick,
-            )
-    } else {
-        Modifier
-    }
-    Column(
-        modifier = modifier
-            .width(cardWidth)
-            .then(clickableModifier),
+            ),
     ) {
         Box(
             modifier = Modifier
-                .width(cardWidth)
-                .height(cardHeight)
-                .clip(RoundedCornerShape(10.dp)),
+                .fillMaxWidth()
+                .height(130.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (isWebdav) Color(0xFF1B3A5C) else Color(0xFF2A2420)),
         ) {
-            PosterImage(path = imagePath, modifier = Modifier.fillMaxSize(), fallbackText = fallbackText)
-            if (progress != null) {
-                val clamped = progress.coerceIn(0f, 1f)
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .background(Color(0x66FFFFFF)),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(clamped)
-                            .height(4.dp)
-                            .background(Color(0xFFE4322D)),
-                    )
-                }
-            }
+            Text(
+                text = if (isWebdav) "WebDAV" else "NAS",
+                color = Color(0xFF9A9AA0),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(10.dp),
+            )
+            Text(
+                text = if (isWebdav) "W" else "N",
+                color = Color.White,
+                fontSize = 40.sp,
+                fontWeight = FontWeight.Black,
+                modifier = Modifier.align(Alignment.Center),
+            )
+            Text(
+                text = "${source.fileCount ?: 0} 个文件",
+                color = Color(0xFF9A9AA0),
+                fontSize = 14.sp,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(10.dp),
+            )
             if (focused) {
                 Box(
                     modifier = Modifier
@@ -92,24 +90,23 @@ fun MediaCard(
                 )
             }
         }
+        Spacer(Modifier.height(8.dp))
         Text(
-            text = title,
+            text = source.name,
             color = Color.White,
             fontSize = 17.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 10.dp, start = 2.dp, end = 2.dp),
+            modifier = Modifier.padding(start = 2.dp, end = 2.dp),
         )
-        if (subtitle != null) {
-            Text(
-                text = subtitle,
-                color = Color(0xFF9A9AA0),
-                fontSize = 14.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(start = 2.dp, end = 2.dp),
-            )
-        }
+        Text(
+            text = source.basePath,
+            color = Color(0xFF9A9AA0),
+            fontSize = 14.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 2.dp, end = 2.dp),
+        )
     }
 }

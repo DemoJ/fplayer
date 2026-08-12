@@ -42,6 +42,12 @@ interface ApiService {
         @Query("offset") offset: Int = 0,
     ): WorksResponse
 
+    @GET("api/browse")
+    suspend fun browse(
+        @Query("sourceId") sourceId: Long = 0,
+        @Query("path") path: String = "",
+    ): BrowseResult
+
     @GET("api/media")
     suspend fun searchMedia(
         @Query("q") q: String,

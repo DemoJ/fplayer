@@ -34,6 +34,7 @@ data class Media(
     @SerializedName("video_codec") val videoCodec: String? = null,
     @SerializedName("audio_codec") val audioCodec: String? = null,
     val path: String,
+    val name: String? = null,
     val position: Double? = null,
     @SerializedName("progress_duration") val progressDuration: Double? = null,
     val completed: Int? = null,
@@ -81,6 +82,35 @@ data class UpNext(
     @SerializedName("source_name") val sourceName: String? = null,
     @SerializedName("from_season") val fromSeason: Int,
     @SerializedName("from_episode") val fromEpisode: Int,
+)
+
+data class Source(
+    val id: Long,
+    val name: String,
+    val type: String,
+    @SerializedName("base_path") val basePath: String,
+    @SerializedName("file_count") val fileCount: Int? = null,
+)
+
+data class BrowseFolder(
+    val name: String,
+    val path: String,
+    @SerializedName("file_count") val fileCount: Int,
+)
+
+data class Crumb(
+    val name: String,
+    val path: String,
+)
+
+data class BrowseResult(
+    val level: String,
+    val path: String,
+    val crumbs: List<Crumb> = emptyList(),
+    val source: Source? = null,
+    val sources: List<Source> = emptyList(),
+    val folders: List<BrowseFolder> = emptyList(),
+    val files: List<Media> = emptyList(),
 )
 
 data class ProbeResponse(

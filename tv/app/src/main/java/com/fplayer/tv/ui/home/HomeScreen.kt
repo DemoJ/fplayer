@@ -30,9 +30,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.fplayer.tv.core.AppContainer
 import com.fplayer.tv.data.Media
+import com.fplayer.tv.data.Source
 import com.fplayer.tv.data.UpNext
 import com.fplayer.tv.ui.common.MediaCard
 import com.fplayer.tv.ui.common.MediaRow
+import com.fplayer.tv.ui.common.SourceCard
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 
@@ -64,12 +66,13 @@ private fun rememberFocusedCardModifier(lastFocusedCard: MutableState<FocusReque
 @Composable
 fun HomeScreen(
     onPlay: (Long) -> Unit,
+    onSourceClick: (Long) -> Unit,
     restoreTick: Int = 0,
 ) {
     val api = AppContainer.apiClient.api
     var continued by remember { mutableStateOf<List<Media>>(emptyList()) }
     var upNext by remember { mutableStateOf<List<UpNext>>(emptyList()) }
-    var recent by remember { mutableStateOf<List<Media>>(emptyList()) }
+    var sources by remember { mutableStateOf<List<Source>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
 
     // 记录最后聚焦的卡片；restoreTick 变化（播放返回）时把焦点还给它。
@@ -82,12 +85,12 @@ fun HomeScreen(
         val result = coroutineScope {
             val a = async { runCatching { api.continueWatching() }.getOrDefault(emptyList()) }
             val b = async { runCatching { api.upNext() }.getOrDefault(emptyList()) }
-            val c = async { runCatching { api.recent() }.getOrDefault(emptyList()) }
+            val c = async { runCatching { api.browse() }.getOrDefault(null) }
             Triple(a.await(), b.await(), c.await())
         }
         continued = result.first
         upNext = result.second
-        recent = result.third
+        sources = result.third?.sources ?: emptyList()
         loading = false
     }
 
@@ -155,14 +158,11 @@ fun HomeScreen(
             }
             Spacer(Modifier.height(20.dp))
 
-            MediaRow(title = "最近添加", count = recent.size) { index ->
-                val media = recent[index]
-                MediaCard(
-                    imagePath = media.workPoster,
-                    title = media.title,
-                    subtitle = mediaSubtitle(media),
-                    fallbackText = media.title,
-                    onClick = { onPlay(media.id) },
+            MediaRow(title = "我的媒体", count = sources.size) { index ->
+                val source = sources[index]
+                SourceCard(
+                    source = source,
+                    onClick = { onSourceClick(source.id) },
                     modifier = rememberFocusedCardModifier(lastFocusedCard),
                 )
             }

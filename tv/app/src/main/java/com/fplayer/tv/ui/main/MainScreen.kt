@@ -40,6 +40,7 @@ import androidx.tv.material3.TabRow
 import androidx.tv.material3.TabRowDefaults
 import com.fplayer.tv.core.Session
 import com.fplayer.tv.data.Work
+import com.fplayer.tv.ui.browse.BrowseScreen
 import com.fplayer.tv.ui.detail.WorkDetailScreen
 import com.fplayer.tv.ui.home.HomeScreen
 import com.fplayer.tv.ui.library.LibraryScreen
@@ -52,6 +53,7 @@ private val tabs = listOf("首页", "电影", "剧集", "搜索")
 fun MainScreen(session: Session, onLogout: () -> Unit) {
     var tab by remember { mutableIntStateOf(0) }
     var detailWorkId by remember { mutableStateOf<Long?>(null) }
+    var browseSourceId by remember { mutableStateOf<Long?>(null) }
     var playingMediaId by remember { mutableStateOf<Long?>(null) }
     // 播放返回时递增，通知首页恢复上次聚焦的卡片。
     var homeRestoreTick by remember { mutableIntStateOf(0) }
@@ -66,9 +68,12 @@ fun MainScreen(session: Session, onLogout: () -> Unit) {
         tabFocusRequesters[tab].requestFocus()
     }
 
-    // BACK 导航：播放页 → 详情 → 列表/首页（首页 BACK 交给系统退出应用）。
+    // BACK 导航：播放页 → 详情/浏览 → 列表/首页（首页 BACK 交给系统退出应用）。
     BackHandler(enabled = playingMediaId != null) { playingMediaId = null }
-    BackHandler(enabled = detailWorkId != null && playingMediaId == null) { detailWorkId = null }
+    BackHandler(enabled = (detailWorkId != null || browseSourceId != null) && playingMediaId == null) {
+        detailWorkId = null
+        browseSourceId = null
+    }
 
     Box(
         modifier = Modifier
@@ -120,7 +125,7 @@ fun MainScreen(session: Session, onLogout: () -> Unit) {
                 val selected = tab == index
                 Tab(
                     selected = selected,
-                    onClick = { tab = index; detailWorkId = null; playingMediaId = null },
+                    onClick = { tab = index; detailWorkId = null; browseSourceId = null; playingMediaId = null },
                     onFocus = {},
                     modifier = Modifier.focusRequester(tabFocusRequesters[index]),
                 ) {
@@ -135,16 +140,27 @@ fun MainScreen(session: Session, onLogout: () -> Unit) {
             }
         }
         val workId = detailWorkId
+        val browseId = browseSourceId
         if (workId != null) {
             WorkDetailScreen(
                 workId = workId,
                 onBack = { detailWorkId = null },
                 onPlay = { playingMediaId = it },
             )
+        } else if (browseId != null) {
+            BrowseScreen(
+                sourceId = browseId,
+                onBack = {
+                    browseSourceId = null
+                    homeRestoreTick += 1
+                },
+                onPlay = { playingMediaId = it },
+            )
         } else {
             when (tab) {
                 0 -> HomeScreen(
                     onPlay = { playingMediaId = it },
+                    onSourceClick = { browseSourceId = it },
                     restoreTick = homeRestoreTick,
                 )
                 1 -> LibraryScreen(kind = "movie", onWorkClick = { detailWorkId = it.id })
