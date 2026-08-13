@@ -24,7 +24,7 @@ export function LibraryBack({ kind }: { kind?: "movie" | "show" }) {
   }}>← 返回片库</button>;
 }
 
-function useCloseOnOutside(menuId: number | undefined, setMenuId: React.Dispatch<React.SetStateAction<number | undefined>>, selector: string) {
+export function useCloseOnOutside(menuId: number | undefined, setMenuId: React.Dispatch<React.SetStateAction<number | undefined>>, selector: string) {
   useEffect(() => {
     if (menuId === undefined) return;
     const close = (event: PointerEvent) => { if (!(event.target as HTMLElement).closest(selector)) setMenuId(undefined); };
@@ -95,6 +95,20 @@ export function MediaSection({ title, items, loading, wide = false, emptyText }:
       setMenuId(undefined);
     }
   }
+  async function removeFromList(item: Media) {
+    setMenuId(undefined);
+    setRemoved((current) => new Set(current).add(item.id));
+    try {
+      const result = await api<{ removed: Array<{ media_id: number; position: number; duration: number }> }>(`/media/${item.id}/remove-from-list`, { method: "POST" });
+      showUndo("已从列表中移除（重新观看后会再次出现）", () => {
+        void Promise.all((result.removed || []).map((r) => api(`/media/${r.media_id}/progress`, { method: "PUT", body: JSON.stringify({ position: r.position, duration: r.duration }) }))).catch(() => {});
+        setRemoved((current) => { const next = new Set(current); next.delete(item.id); return next; });
+      });
+    } catch (error) {
+      window.alert((error as Error).message);
+      setRemoved((current) => { const next = new Set(current); next.delete(item.id); return next; });
+    }
+  }
   async function refresh(item: Media) {
     if (!item.work_id || refreshingWorkId) return;
     setRefreshingWorkId(item.work_id);
@@ -133,7 +147,7 @@ export function MediaSection({ title, items, loading, wide = false, emptyText }:
         </PosterBg>
         <h3>{item.title}</h3>
         <p>{item.kind === "show" && item.season ? `第 ${item.season} 季 · 第 ${item.episode} 集` : item.source_name || item.container?.toUpperCase() || "视频"}{percent > 0 ? ` · 已看 ${Math.round(percent)}%` : ""}</p>
-      </Link><button className="media-more" type="button" aria-label="更多操作" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setMenuId(menuId === item.id ? undefined : item.id); }}>⋯</button>{menuId === item.id && <div className="media-menu"><button type="button" onClick={() => void toggleDone(item)}>{item.completed ? "取消已完成" : "标记为已完成"}</button><button type="button" disabled={!item.work_id || refreshingWorkId === item.work_id} onClick={() => void refresh(item)}>{refreshingWorkId === item.work_id ? "刮削中..." : "重新刮削"}</button><button type="button" onClick={() => { setEditing(item); setMenuId(undefined); }}>编辑文件信息</button><button type="button" className="danger-text" onClick={() => void remove(item)}>删除文件</button></div>}</article>;
+      </Link><button className="media-more" type="button" aria-label="更多操作" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setMenuId(menuId === item.id ? undefined : item.id); }}>⋯</button>{menuId === item.id && <div className="media-menu"><button type="button" onClick={() => void toggleDone(item)}>{item.completed ? "取消已完成" : "标记为已完成"}</button><button type="button" disabled={!item.work_id || refreshingWorkId === item.work_id} onClick={() => void refresh(item)}>{refreshingWorkId === item.work_id ? "刮削中..." : "重新刮削"}</button><button type="button" onClick={() => { setEditing(item); setMenuId(undefined); }}>编辑文件信息</button><button type="button" onClick={() => void removeFromList(item)}>移除</button><button type="button" className="danger-text" onClick={() => void remove(item)}>删除文件</button></div>}</article>;
     })}</div>}
     {editing && <MediaEditDialog item={editing} onClose={() => setEditing(undefined)} onSaved={() => setEditing(undefined)} />}
   </section>;

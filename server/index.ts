@@ -387,6 +387,28 @@ app.post("/api/media/:id/restore", auth, admin, (req, res) => {
   if (!result.changes) return res.status(404).json({ error: "媒体不存在" });
   res.json({ ok: true });
 });
+app.post("/api/media/:id/remove-from-list", auth, (req: AuthRequest, res) => {
+  // 「移除」只清理首页列表（继续播放/接下来）的数据来源（progress 观看记录），
+  // 不触碰文件本身。重新观看会自动重建记录，条目随即回到列表。
+  const media = db.prepare("SELECT id, work_id FROM media WHERE id=? AND available=1 AND trashed=0").get(req.params.id) as { id: number; work_id: number | null } | undefined;
+  if (!media) return res.status(404).json({ error: "媒体不存在" });
+  const removed: Array<{ media_id: number; position: number; duration: number }> = [];
+  const take = (mediaId: number) => {
+    const row = db.prepare("SELECT media_id, position, duration FROM progress WHERE user_id=? AND media_id=?").get(req.user!.id, mediaId) as { media_id: number; position: number; duration: number } | undefined;
+    if (row) {
+      removed.push(row);
+      db.prepare("DELETE FROM progress WHERE user_id=? AND media_id=?").run(req.user!.id, mediaId);
+    }
+  };
+  take(media.id);
+  // 剧集：同时移除推导「接下来」的来源（该作品最近看完的一集），否则下一集
+  // 推荐会立刻再次出现。
+  if (media.work_id) {
+    const last = db.prepare("SELECT p.media_id FROM progress p JOIN media m ON m.id=p.media_id WHERE p.user_id=? AND m.work_id=? AND p.completed=1 ORDER BY p.updated_at DESC LIMIT 1").get(req.user!.id, media.work_id) as { media_id: number } | undefined;
+    if (last && last.media_id !== media.id) take(last.media_id);
+  }
+  res.json({ ok: true, removed });
+});
 app.get("/api/trash", auth, admin, (_req, res) => {
   const rows = db.prepare(`
     SELECT m.id, m.title, m.path, m.size, m.season, m.episode, m.kind, s.name AS source_name

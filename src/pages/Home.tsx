@@ -1,14 +1,53 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type BrowseResult, type Media, type Source, type UpNext } from "../api";
-import { MediaSection, PosterBg } from "../components";
+import { MediaSection, PosterBg, useCloseOnOutside } from "../components";
 
 function UpNextSection({ items, loading }: { items: UpNext[]; loading: boolean }) {
-  if (!loading && items.length === 0) return null;
+  const [menuId, setMenuId] = useState<number>();
+  const [removed, setRemoved] = useState<Set<number>>(new Set());
+  const [undo, setUndo] = useState<{ message: string; onUndo: () => void }>();
+  const undoRef = useRef<number | undefined>(undefined);
+  const visible = items.filter((item) => !removed.has(item.id));
+  useCloseOnOutside(menuId, setMenuId, ".media-menu, .media-more");
+  function showUndo(message: string, onUndo: () => void) {
+    if (undoRef.current) window.clearTimeout(undoRef.current);
+    setUndo({ message, onUndo });
+    undoRef.current = window.setTimeout(() => setUndo(undefined), 6000);
+  }
+  useEffect(() => () => { if (undoRef.current) window.clearTimeout(undoRef.current); }, []);
+  async function removeFromList(item: UpNext) {
+    setMenuId(undefined);
+    setRemoved((current) => new Set(current).add(item.id));
+    try {
+      const result = await api<{ removed: Array<{ media_id: number; position: number; duration: number }> }>(`/media/${item.id}/remove-from-list`, { method: "POST" });
+      showUndo("已从列表中移除（重新观看后会再次出现）", () => {
+        void Promise.all((result.removed || []).map((r) => api(`/media/${r.media_id}/progress`, { method: "PUT", body: JSON.stringify({ position: r.position, duration: r.duration }) }))).catch(() => {});
+        setRemoved((current) => { const next = new Set(current); next.delete(item.id); return next; });
+      });
+    } catch (error) {
+      window.alert((error as Error).message);
+      setRemoved((current) => { const next = new Set(current); next.delete(item.id); return next; });
+    }
+  }
+  async function finish(item: UpNext) {
+    const duration = item.duration ?? 0;
+    setMenuId(undefined);
+    try { await api(`/media/${item.id}/progress`, { method: "PUT", body: JSON.stringify({ position: duration, duration }) }); window.location.reload(); }
+    catch (error) { window.alert((error as Error).message); }
+  }
+  async function remove(item: UpNext) {
+    if (!window.confirm(`确定将「${item.work_title} S${pad(item.season)}E${pad(item.episode)}」移到回收站吗？可随时恢复。`)) return;
+    setMenuId(undefined);
+    try { await api(`/media/${item.id}`, { method: "DELETE" }); window.location.reload(); }
+    catch (error) { window.alert((error as Error).message); }
+  }
+  if (!loading && visible.length === 0) return null;
   const pad = (value: number) => String(value).padStart(2, "0");
   return <section className="media-section">
-    <div className="section-heading"><h2>接下来</h2><span>{items.length} 部</span></div>
-    {loading ? <div className="empty">正在整理接下来...</div> : <div className="continue-grid">{items.map((item, index) => <article className="media-card" key={item.id}><Link className="poster-card" to={`/watch/${item.id}`}><PosterBg path={item.work_poster} className={`poster art-${index % 6}`}><span>SERIES</span><b>{item.work_poster ? "" : item.work_title.slice(0, 1)}</b></PosterBg><h3>{item.work_title}</h3><p>看完 S{pad(item.from_season)}E{pad(item.from_episode)} · 下一集 S{pad(item.season)}E{pad(item.episode)}</p></Link></article>)}</div>}
+    <div className="section-heading"><h2>接下来</h2><span>{visible.length} 部</span></div>
+    {undo && <div className="admin-toast">{undo.message}<button type="button" onClick={undo.onUndo}>撤销</button><button type="button" aria-label="关闭" onClick={() => setUndo(undefined)}>×</button></div>}
+    {loading ? <div className="empty">正在整理接下来...</div> : <div className="continue-grid">{visible.map((item, index) => <article className="media-card" key={item.id}><Link className="poster-card" to={`/watch/${item.id}`}><PosterBg path={item.work_poster} className={`poster art-${index % 6}`}><span>SERIES</span><b>{item.work_poster ? "" : item.work_title.slice(0, 1)}</b></PosterBg><h3>{item.work_title}</h3><p>看完 S{pad(item.from_season)}E{pad(item.from_episode)} · 下一集 S{pad(item.season)}E{pad(item.episode)}</p></Link><button className="media-more" type="button" aria-label="更多操作" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setMenuId(menuId === item.id ? undefined : item.id); }}>⋯</button>{menuId === item.id && <div className="media-menu"><button type="button" onClick={() => void finish(item)}>标记为已完成</button><button type="button" onClick={() => void removeFromList(item)}>移除</button><button type="button" className="danger-text" onClick={() => void remove(item)}>删除文件</button></div>}</article>)}</div>}
   </section>;
 }
 
