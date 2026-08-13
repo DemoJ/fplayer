@@ -111,6 +111,19 @@ app.post("/api/logout", auth, (req: AuthRequest, res) => {
   res.json({ ok: true });
 });
 app.get("/api/me", auth, (req: AuthRequest, res) => res.json({ user: req.user }));
+app.post("/api/me/password", auth, (req: AuthRequest, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword) return res.status(400).json({ error: "请输入当前密码" });
+  if (!newPassword || newPassword.length < 8) return res.status(400).json({ error: "新密码至少 8 位" });
+  if (currentPassword === newPassword) return res.status(400).json({ error: "新密码不能与当前密码相同" });
+  const user = db.prepare("SELECT * FROM users WHERE id=?").get(req.user!.id) as any;
+  if (!user || !verifyPassword(currentPassword, user.password_hash)) return res.status(403).json({ error: "当前密码不正确" });
+  db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hashPassword(newPassword), user.id);
+  // Revoke the user's other sessions so a leaked one can't survive a password change.
+  const token = req.headers.authorization?.replace("Bearer ", "") || "";
+  if (token) db.prepare("DELETE FROM sessions WHERE user_id=? AND token_hash<>?").run(user.id, hashToken(token));
+  res.json({ ok: true });
+});
 app.get("/api/sources", auth, (_req, res) => res.json(db.prepare("SELECT id,name,type,base_path,username,enabled,last_scan_at,last_error FROM sources ORDER BY id DESC").all()));
 app.post("/api/sources", auth, admin, (req, res) => { const { name, type, basePath, username, password } = req.body; if (!name || !basePath || !["local", "webdav"].includes(type)) return res.status(400).json({ error: "媒体源参数不完整" }); const result = db.prepare("INSERT INTO sources(name,type,base_path,username,secret) VALUES(?,?,?,?,?)").run(name, type, basePath, username || null, password ? encrypt(password) : null); res.json({ id: result.lastInsertRowid }); });
 app.put("/api/sources/:id", auth, admin, (req, res) => { const { name, type, basePath, username, password } = req.body; if (!name || !basePath || !["local", "webdav"].includes(type)) return res.status(400).json({ error: "媒体源参数不完整" }); const existing = db.prepare("SELECT * FROM sources WHERE id=?").get(req.params.id) as Source | undefined; if (!existing) return res.status(404).json({ error: "媒体源不存在" }); const secret = type === "local" ? null : password ? encrypt(password) : existing.secret; db.prepare("UPDATE sources SET name=?,type=?,base_path=?,username=?,secret=?,last_error=NULL WHERE id=?").run(name, type, basePath, type === "webdav" ? username || null : null, secret, req.params.id); res.json({ ok: true }); });

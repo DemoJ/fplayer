@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { api, type ScanJob, type Source } from "../api";
+import { api, type ScanJob, type Source, type User } from "../api";
 
 const emptySourceForm = { name: "", type: "webdav", basePath: "", username: "", password: "" };
 
 type TrashItem = { id: number; title: string; path: string; size?: number; season?: number; episode?: number; kind: string; source_name: string };
 
-export function SourceAdmin({ jobs, refreshJobs }: { jobs: ScanJob[]; refreshJobs: (jobs: ScanJob[]) => void }) {
+export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: ScanJob[]; refreshJobs: (jobs: ScanJob[]) => void }) {
   const [sources, setSources] = useState<Source[]>([]);
   const [editingId, setEditingId] = useState<number>();
   const [showForm, setShowForm] = useState(false);
@@ -17,6 +17,8 @@ export function SourceAdmin({ jobs, refreshJobs }: { jobs: ScanJob[]; refreshJob
   const [showDouban, setShowDouban] = useState(false);
   const [busyId, setBusyId] = useState<number>();
   const [trash, setTrash] = useState<TrashItem[]>([]);
+  const [showPassword, setShowPassword] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const load = () => api<Source[]>("/sources").then(setSources);
   const loadTrash = () => api<TrashItem[]>("/trash").then(setTrash).catch(() => {});
   const loadMeta = () => api<typeof meta>("/metadata/status").then(setMeta).catch(() => {});
@@ -100,6 +102,21 @@ export function SourceAdmin({ jobs, refreshJobs }: { jobs: ScanJob[]; refreshJob
       if (editingId === source.id) closeForm();
       setMessage("媒体源已删除");
       await load();
+    } catch (error) {
+      setMessage((error as Error).message);
+    }
+  }
+  function openPassword() {
+    setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    setShowPassword(true);
+  }
+  async function submitPassword(event: React.FormEvent) {
+    event.preventDefault();
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) { setMessage("两次输入的新密码不一致"); return; }
+    try {
+      await api("/me/password", { method: "POST", body: JSON.stringify({ currentPassword: passwordForm.currentPassword, newPassword: passwordForm.newPassword }) });
+      setMessage("密码已修改，其他设备的登录已失效");
+      setShowPassword(false);
     } catch (error) {
       setMessage((error as Error).message);
     }
@@ -255,6 +272,37 @@ export function SourceAdmin({ jobs, refreshJobs }: { jobs: ScanJob[]; refreshJob
         <div className="work-files-list">{trash.map((item) => <div className="work-file-row" key={item.id}><div><strong>{item.kind === "show" && item.season ? `S${String(item.season).padStart(2, "0")}E${String(item.episode || 0).padStart(2, "0")}` : item.title}</strong><small>{item.path} · {item.source_name}</small></div><div className="trash-actions-inline"><button className="ghost" type="button" onClick={() => void restoreTrashItem(item.id)}>恢复</button><button className="ghost danger" type="button" onClick={() => void deleteTrashItem(item.id)}>彻底删除</button></div></div>)}</div>
       </>}
     </section>
+
+    <section className="source-board">
+      <div className="section-heading"><h2>账户</h2><span>{user.username} · {user.role === "admin" ? "管理员" : "成员"}</span></div>
+      <div className="empty-card account-card">
+        <div>
+          <strong>登录密码</strong>
+          <p>定期修改密码可降低账号被窃取的风险。修改后其他设备上的登录状态将失效。</p>
+        </div>
+        <button className="primary" onClick={openPassword}>修改密码</button>
+      </div>
+    </section>
+
+    {showPassword && <div className="drawer-mask" onClick={() => setShowPassword(false)}>
+      <form className="drawer" onClick={(e) => e.stopPropagation()} onSubmit={submitPassword}>
+        <div className="drawer-head">
+          <div>
+            <span className="eyebrow">ACCOUNT</span>
+            <h2>修改密码</h2>
+          </div>
+          <button type="button" className="icon-close" aria-label="关闭" onClick={() => setShowPassword(false)}>×</button>
+        </div>
+        <p className="drawer-desc">输入当前密码验证身份，新密码至少 8 位。保存后当前设备保持登录，其他设备需重新登录。</p>
+        <label>当前密码<input type="password" value={passwordForm.currentPassword} onChange={(e) => setPasswordForm({ ...passwordForm, currentPassword: e.target.value })} required /></label>
+        <label>新密码<input type="password" value={passwordForm.newPassword} onChange={(e) => setPasswordForm({ ...passwordForm, newPassword: e.target.value })} minLength={8} required /></label>
+        <label>确认新密码<input type="password" value={passwordForm.confirmPassword} onChange={(e) => setPasswordForm({ ...passwordForm, confirmPassword: e.target.value })} minLength={8} required /></label>
+        <div className="drawer-actions">
+          <button type="button" className="secondary" onClick={() => setShowPassword(false)}>取消</button>
+          <button className="primary" type="submit">保存新密码</button>
+        </div>
+      </form>
+    </div>}
 
     {showForm && <div className="drawer-mask" onClick={closeForm}>
       <form className="drawer" onClick={(e) => e.stopPropagation()} onSubmit={submit}>

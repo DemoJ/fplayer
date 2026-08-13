@@ -58,3 +58,15 @@ GPU 转码需要宿主机安装 NVIDIA 驱动与 NVIDIA Container Toolkit。可�
 6. 添加 WebDAV 地址或容器内本地目录，点击“测试”和“扫描”。
 
 数据默认保存在项目目录的 `data/` 下，包含 SQLite 数据库和加密后的媒体源凭证。请定期备份该目录。
+
+## 忘记密码
+
+管理员密码无法找回，但可用脚本直接重置（需知道用户名；重置会清除该用户全部登录会话，请用新密码重新登录）：
+
+```bash
+# 容器部署
+docker compose exec fplayer node dist-server/reset-password.js 用户名 新密码
+
+# 宿主机本地运行（npm run dev 场景）
+npm run reset-password -- 用户名 新密码
+```

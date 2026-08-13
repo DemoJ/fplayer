@@ -68,6 +68,9 @@
 .empty-card { border: 1px dashed #33373a; padding: 40px 24px; text-align: center; color: #888; }
 .empty-card strong { display: block; color: #ddd; margin-bottom: 8px; }
 .empty-card p { margin: 0 0 18px; font-size: .85rem; }
+.account-card { display: flex; align-items: center; justify-content: space-between; gap: 20px; text-align: left; padding: 24px; }
+.account-card div { flex: 1; }
+.account-card p { margin: 0; }
 .drawer-mask { position: fixed; inset: 0; z-index: 30; background: #000a; display: flex; justify-content: flex-end; }
 .drawer { width: min(420px, 100vw); height: 100%; background: #121518; border-left: 1px solid #2c3033; padding: 28px 24px 32px; overflow: auto; box-shadow: -20px 0 60px #0008; }
 .drawer-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
