@@ -134,7 +134,6 @@ data class TranscodeResponse(
 data class ProgressRequest(
     val position: Double,
     val duration: Double,
-    val completed: Boolean,
 )
 
 data class OkResponse(

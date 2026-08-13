@@ -38,7 +38,6 @@ function Player() {
   const lastSavedRef = useRef(0);
   const lastPositionRef = useRef(0);
   const userSeekRef = useRef(false);
-  const lastUserSeekRef = useRef(0);
   const chromeTimerRef = useRef<number | undefined>(undefined);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef(false);
@@ -427,23 +426,8 @@ function Player() {
     // Throttle with wall-clock time so a backwards seek still persists on pause.
     if (!force && now - lastSavedRef.current < 5000) return;
     lastSavedRef.current = now;
-    // A live transcode stream reports a duration that tracks the downloaded
-    // window, so completion can only be judged against a trusted duration.
-    // Direct playback reports the full source duration natively — trusted even
-    // without a probe (remote sources skip probing) — so only HLS streams
-    // still need the near-end distance check.
-    const reliable = probedDuration !== undefined || playMode !== "hls" || Math.abs(element.duration - position) < 60;
-    const remaining = duration - position;
-    // Dragging the timeline into the final stretch is not the same as watching
-    // it through: only playback that actually reaches the very end, or natural
-    // playback persisting well past a user seek, may mark the media completed.
-    // A pending seek check also blocks completion: the position may still be
-    // the live-edge snap rather than where the user actually dragged.
-    // Completion line: the last 5% — a 45-min episode counts as watched once
-    // under ~2m15s remain.
-    const watchedThrough = remaining < 2 || Date.now() - lastUserSeekRef.current > 30000;
-    const completed = reliable && remaining <= duration * 0.05 && watchedThrough && pendingSeekTimerRef.current === undefined;
-    api(`/media/${id}/progress`, { method: "PUT", body: JSON.stringify({ position: Math.min(position, duration), duration, completed }) }).catch(() => {});
+    // 完成判定收敛到服务端（剩余 ≤5%+1s），客户端只上报位置事实。
+    api(`/media/${id}/progress`, { method: "PUT", body: JSON.stringify({ position: Math.min(position, duration), duration }) }).catch(() => {});
   }
 
   // Hold the latest save() in a ref so the unmount cleanup below always calls
@@ -524,7 +508,6 @@ function Player() {
         state.longPressActive = false;
       } else {
         video.currentTime += event.key === "ArrowRight" ? SEEK_SECONDS : -SEEK_SECONDS;
-        lastUserSeekRef.current = Date.now();
         verifySeek(video.currentTime + offsetRef.current);
         showSeekHint(event.key === "ArrowRight" ? "fwd" : "back");
       }

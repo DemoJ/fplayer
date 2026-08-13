@@ -77,11 +77,11 @@ fun HomeScreen(
 
     // 记录最后聚焦的卡片；restoreTick 变化（播放返回）时把焦点还给它。
     val lastFocusedCard = remember { mutableStateOf<FocusRequester?>(null) }
+
+    // 首次进入与播放/浏览返回（restoreTick 变化）时重新加载数据：
+    // 播放超过 95% 会被标记为已完成，不刷新的话"继续观看"会残留旧条目、"接下来"不更新。
     LaunchedEffect(restoreTick) {
         if (restoreTick > 0) lastFocusedCard.value?.requestFocus()
-    }
-
-    LaunchedEffect(Unit) {
         val result = coroutineScope {
             val a = async { runCatching { api.continueWatching() }.getOrDefault(emptyList()) }
             val b = async { runCatching { api.upNext() }.getOrDefault(emptyList()) }

@@ -89,7 +89,6 @@ class PlayerController(
     private var sessionDead = false
     private var initialSeekMs = 0L
     private var autoRestarted = false
-    private var lastUserSeekMs = 0L
     private var lastSavedMs = 0L
     private var retryCount = 0
     private var retryJob: Job? = null
@@ -300,7 +299,6 @@ class PlayerController(
     }
 
     fun seekTo(absSec: Double) {
-        lastUserSeekMs = System.currentTimeMillis()
         if (playMode == PlayMode.DIRECT) {
             player.seekTo((absSec.coerceAtLeast(0.0) * 1000).toLong())
             return
@@ -384,27 +382,24 @@ class PlayerController(
 
     private fun positionSec(): Double = player.currentPosition / 1000.0 + offsetStart
 
-    // ---- 进度上报（节流 5s，completed 判定对齐网页端） ----
-    fun save(force: Boolean = false) {
-        val item = media ?: return
+    // ---- 进度上报（节流 5s，完成判定由服务端统一处理） ----
+    fun save(force: Boolean = false): Job? {
+        val item = media ?: return null
         val absPos = positionSec()
         val duration = item.duration
             ?: item.progressDuration
             ?: (player.duration / 1000.0).takeIf { it > 0 }
             ?: 0.0
-        if (duration <= 0 || absPos <= 0) return
+        if (duration <= 0 || absPos <= 0) return null
         // 失败/卡住的位置 0 不允许覆盖已保存的进度
-        if (absPos < 5 && (item.position ?: 0.0) > 30) return
+        if (absPos < 5 && (item.position ?: 0.0) > 30) return null
         val now = System.currentTimeMillis()
-        if (!force && now - lastSavedMs < 5000) return
+        if (!force && now - lastSavedMs < 5000) return null
         lastSavedMs = now
-        val remaining = duration - absPos
-        // 拖动到结尾不算看完：用户 seek 后 30s 内不判定 completed
-        val watchedThrough = remaining < 2 || now - lastUserSeekMs > 30_000
-        val completed = remaining <= duration * 0.05 && watchedThrough && absPos <= duration + 2
         val position = min(absPos, duration)
-        scope.launch {
-            runCatching { api.progress(item.id, ProgressRequest(position = position, duration = duration, completed = completed)) }
+        // 完成判定由服务端统一处理（剩余 ≤5%+1s），客户端只上报位置事实。
+        return scope.launch {
+            runCatching { api.progress(item.id, ProgressRequest(position = position, duration = duration)) }
         }
     }
 

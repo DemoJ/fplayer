@@ -47,6 +47,7 @@ import kotlin.math.roundToLong
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 private fun formatTime(ms: Long): String {
     val total = (ms.coerceAtLeast(0) / 1000).toInt()
@@ -115,9 +116,12 @@ fun PlayerScreen(
     }
     BackHandler(enabled = menuOpen) { menuOpen = false }
     // BACK：菜单已关时保存进度并返回（BACK 是系统键，不走 onPreviewKeyEvent）。
+    // 等待进度上报完成再返回，避免首页刷新时服务端还没收到 completed 标记。
     BackHandler(enabled = !menuOpen) {
-        controller.save(force = true)
-        onBack()
+        scope.launch {
+            withTimeoutOrNull(2000) { controller.save(force = true)?.join() }
+            onBack()
+        }
     }
 
     Box(

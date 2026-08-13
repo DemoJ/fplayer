@@ -450,18 +450,13 @@ async function purgeExpiredTrash() {
   }
 }
 app.put("/api/media/:id/progress", auth, (req: AuthRequest, res) => {
-  const position = Math.max(0, Number(req.body?.position) || 0);
   const duration = Math.max(0, Number(req.body?.duration) || 0);
-  const requestedCompleted = Boolean(req.body?.completed);
-  // The client is the source of truth for completion — it knows whether the
-  // end was reached by watching or by a drag/seek. So when the client sends an
-  // explicit verdict, honor it. The "position at the very end" heuristic only
-  // applies to callers that do not declare completed (e.g. a plain progress
-  // beacon), so dragging the timeline to the final seconds is never
-  // re-marked as finished against the client's intent.
-  const explicit = typeof req.body?.completed === "boolean";
-  const nearEnd = !explicit && duration > 0 && position >= duration - 15;
-  const completed = requestedCompleted || nearEnd ? 1 : 0;
+  const position = Math.min(Math.max(0, Number(req.body?.position) || 0), duration);
+  // 完成判定收敛到服务端：剩余 ≤5%（+1s 容差）即视为看完，多客户端判定规则
+  // 不再各自实现（TV/Web 曾因 seek 抑制、拖动语义不同而漂移）。客户端只上报
+  // position/duration 事实；手动"标记完成/取消"仍生效——它们通过
+  // position=duration 或 position=0 表达，服务端规则天然兼容。
+  const completed = duration > 0 && duration - position <= duration * 0.05 + 1 ? 1 : 0;
   db.prepare("INSERT INTO progress(user_id,media_id,position,duration,completed) VALUES(?,?,?,?,?) ON CONFLICT(user_id,media_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,completed=excluded.completed,updated_at=CURRENT_TIMESTAMP").run(req.user!.id, req.params.id, position, duration, completed); res.json({ ok: true });
 });
 async function openMedia(req: AuthRequest, res: express.Response, next: express.NextFunction) {
