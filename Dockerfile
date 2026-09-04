@@ -16,17 +16,23 @@ ENV npm_config_node_mirror=https://npmmirror.com/mirrors/node
 ENV NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node
 RUN npm install --registry=${NPM_REGISTRY} --no-audit --no-fund
 COPY . .
-RUN npm run build && npm prune --omit=dev
+RUN npm run build
 
 FROM node:22-bookworm-slim
-ARG DEBIAN_MIRROR=http://mirrors.tuna.tsinghua.edu.cn
-RUN sed -i "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}/debian|g; s|http://deb.debian.org/debian-security|${DEBIAN_MIRROR}/debian-security|g" /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 WORKDIR /app
-COPY --from=build /app/package*.json ./
-COPY --from=build /app/node_modules ./node_modules
+# ffmpeg/ffprobe are provided by a host-mounted static build (see
+# docker-compose.yml FFMPEG_PATH/FFPROBE_PATH), so the runtime image no longer
+# needs apt to install the ~200 ffmpeg dependency packages on every build.
+# Install production dependencies directly instead of copying the build-stage
+# node_modules and pruning dev packages. `npm prune --omit=dev` walks the whole
+# tree and is very slow; a fresh `npm ci --omit=dev` here is fast and leaves a
+# clean, smaller runtime.
+ENV npm_config_better_sqlite3_binary_host_mirror=https://npmmirror.com/mirrors/better-sqlite3
+ENV npm_config_node_mirror=https://npmmirror.com/mirrors/node
+ENV NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node
+COPY package*.json ./
+RUN npm ci --omit=dev --registry=${NPM_REGISTRY} --no-audit --no-fund
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/dist-server ./dist-server
 ENV NODE_ENV=production

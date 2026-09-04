@@ -11,6 +11,7 @@ import { mediaInputUrl, probe, sourceFile, acquireCredentialProxy, webdavHeaders
 import { activeCount, destroy, get, maxConcurrent, owns, register, activeSessionFor, producedSeq, withLock } from "./transcodes.js";
 import { absSeq, blockHead, buildPlaylist, contiguousFrom, ensureCacheDir, fileExists, listSegments, readMeta, segSecFor, segmentFile, sweepCache, sweepStaleDirectories, touch, writeMeta, REMUX_SEGMENT_SECONDS, TRANSCODE_SEGMENT_SECONDS } from "./transcode-cache.js";
 import { startScan, stopScan } from "./scans.js";
+import { getAutoSyncSettings, restartAutoSync, saveAutoSyncSettings, startAutoSync } from "./sync.js";
 import { rebuildCatalog } from "./catalog.js";
 import { metadataStatus, startMetadataRefresh, stopMetadataRefresh, checkDoubanLogin, refreshWorkMetadata } from "./metadata.js";
 import { getDoubanSettings, saveDoubanSettings } from "./douban.js";
@@ -133,6 +134,17 @@ app.get("/api/scans", auth, (_req, res) => { const jobs = db.prepare("SELECT j.*
 app.post("/api/sources/:id/scan", auth, admin, (req, res) => { const source = db.prepare("SELECT id FROM sources WHERE id=?").get(req.params.id); if (!source) return res.status(404).json({ error: "媒体源不存在" }); res.status(202).json(startScan(Number(req.params.id))); });
 app.post("/api/scans/:id/stop", auth, admin, (req, res) => stopScan(Number(req.params.id)) ? res.json({ ok: true }) : res.status(409).json({ error: "扫描任务不在运行中" }));
 app.post("/api/scans/:id/acknowledge", auth, admin, (req, res) => { db.prepare("UPDATE scan_jobs SET acknowledged=1 WHERE id=?").run(req.params.id); res.json({ ok: true }); });
+
+// Auto-sync settings: how often the server should run incremental scans
+// to pick up new files added to WebDAV/local sources.
+app.get("/api/settings/auto-sync", auth, (_req, res) => res.json(getAutoSyncSettings()));
+app.put("/api/settings/auto-sync", auth, admin, (req, res) => {
+  const { enabled, intervalMinutes } = req.body as { enabled?: boolean; intervalMinutes?: number };
+  const settings = { enabled: enabled !== false, intervalMinutes: Math.max(1, Number(intervalMinutes) || 15) };
+  saveAutoSyncSettings(settings);
+  restartAutoSync();
+  res.json(settings);
+});
 app.get("/api/metadata/status", auth, admin, (_req, res) => res.json(metadataStatus()));
 app.post("/api/metadata/refresh", auth, admin, (_req, res) => res.status(202).json(startMetadataRefresh()));
 app.post("/api/metadata/stop", auth, admin, (_req, res) => stopMetadataRefresh() ? res.json({ ok: true }) : res.status(409).json({ error: "匹配任务不在运行中" }));
@@ -954,4 +966,5 @@ cacheSweepTimer.unref();
 void purgeExpiredTrash();
 const trashPurgeTimer = setInterval(() => void purgeExpiredTrash(), 24 * 60 * 60 * 1000);
 trashPurgeTimer.unref();
+startAutoSync();
 app.listen(config.port, () => console.log(`FPlayer listening on :${config.port}`));

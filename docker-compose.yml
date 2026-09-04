@@ -10,12 +10,16 @@ services:
       # （替换后需重新填写已保存的 WebDAV 密码。）
       APP_SECRET: c699a24b5bd628fb002cd2e1bc74bd1fae771f2bd5257c20e344ecfe6c9a3f5a
       DATA_DIR: /data
+      # Use the host-mounted static ffmpeg/ffprobe (no per-build apt install).
+      FFMPEG_PATH: /ffmpeg-static/ffmpeg
+      FFPROBE_PATH: /ffmpeg-static/ffprobe
       TRANSCODE_ACCELERATION: auto
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: video,compute,utility
     gpus: all
     volumes:
       - ./data:/data
+      - ./ffmpeg-static:/ffmpeg-static:ro
       # 容器现以非 root 用户(uid 1000)运行。若 data/ 目录是老版本(root 所有)产生的，
       # 首次升级需执行一次：sudo chown -R 1000:1000 data
       # 需要读取 NAS 本地媒体目录时，取消注释并把左侧改成实际路径

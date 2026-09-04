@@ -121,9 +121,19 @@ export async function scanSource(sourceId: number, signal?: AbortSignal, progres
     if (index % 50 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throwIfAborted(signal);
+  // Incremental: upsert scanned files, then mark anything not seen this scan
+  // as unavailable (deleted from source). Previously this was a full rebuild
+  // that first set available=0 for every row, which caused a brief window
+  // where the library appeared empty and broke foreign-key cascades.
   const transaction = db.transaction((items: typeof prepared) => {
-    db.prepare("UPDATE media SET available=0 WHERE source_id=?").run(sourceId);
     for (const file of items) insert.run(file);
+    const seen = new Set(items.map((f) => f.path));
+    const existing = db.prepare("SELECT path FROM media WHERE source_id=? AND available=1 AND trashed=0").all(sourceId) as Array<{ path: string }>;
+    const missing = existing.filter((row) => !seen.has(row.path)).map((row) => row.path);
+    if (missing.length) {
+      const mark = db.prepare("UPDATE media SET available=0 WHERE source_id=? AND path=?");
+      for (const p of missing) mark.run(sourceId, p);
+    }
     db.prepare("UPDATE sources SET last_scan_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=?").run(sourceId);
   });
   transaction(prepared);

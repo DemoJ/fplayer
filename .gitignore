@@ -7,6 +7,7 @@ dist-server/
 .idea/
 *.log
 test-media/
+ffmpeg-static/
 
 # TV (Android / Gradle / Kotlin)
 tv/.gradle/

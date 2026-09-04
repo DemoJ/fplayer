@@ -15,6 +15,7 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
   const [doubanForm, setDoubanForm] = useState({ cookies: "", avoidRiskControl: true });
   const [loginInfo, setLoginInfo] = useState<{ isLogined?: boolean; name?: string }>({});
   const [showDouban, setShowDouban] = useState(false);
+  const [autoSync, setAutoSync] = useState<{ enabled: boolean; intervalMinutes: number }>({ enabled: true, intervalMinutes: 15 });
   const [busyId, setBusyId] = useState<number>();
   const [trash, setTrash] = useState<TrashItem[]>([]);
   const [showPassword, setShowPassword] = useState(false);
@@ -23,7 +24,8 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
   const loadTrash = () => api<TrashItem[]>("/trash").then(setTrash).catch(() => {});
   const loadMeta = () => api<typeof meta>("/metadata/status").then(setMeta).catch(() => {});
   const loadDoubanSettings = () => api<{ cookies: string; avoidRiskControl: boolean }>("/metadata/settings").then((s) => setDoubanForm({ cookies: s.cookies || "", avoidRiskControl: s.avoidRiskControl !== false })).catch(() => {});
-  useEffect(() => { load(); loadMeta(); loadDoubanSettings(); loadTrash(); }, []);
+  const loadAutoSync = () => api<{ enabled: boolean; intervalMinutes: number }>("/settings/auto-sync").then(setAutoSync).catch(() => {});
+  useEffect(() => { load(); loadMeta(); loadDoubanSettings(); loadTrash(); loadAutoSync(); }, []);
   async function restoreTrashItem(id: number) {
     try { await api(`/media/${id}/restore`, { method: "POST" }); setMessage("已从回收站恢复"); await loadTrash(); }
     catch (error) { setMessage((error as Error).message); }
@@ -117,6 +119,14 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
       await api("/me/password", { method: "POST", body: JSON.stringify({ currentPassword: passwordForm.currentPassword, newPassword: passwordForm.newPassword }) });
       setMessage("密码已修改，其他设备的登录已失效");
       setShowPassword(false);
+    } catch (error) {
+      setMessage((error as Error).message);
+    }
+  }
+  async function saveAutoSync() {
+    try {
+      await api("/settings/auto-sync", { method: "PUT", body: JSON.stringify(autoSync) });
+      setMessage("自动同步设置已保存");
     } catch (error) {
       setMessage((error as Error).message);
     }
@@ -234,6 +244,29 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
 
     <section className="source-board">
       <div className="section-heading"><h2>已连接存储</h2><span>{sources.length} 个</span></div>
+      <div className="sync-card">
+        <div className="sync-card-main">
+          <div className="source-icon">⟳</div>
+          <div className="source-info">
+            <h3>自动同步</h3>
+            <p>定时增量扫描媒体源，发现新文件后自动入库。</p>
+          </div>
+        </div>
+        <div className="sync-card-controls">
+          <label className="sync-toggle">
+            <input type="checkbox" checked={autoSync.enabled} onChange={(e) => setAutoSync({ ...autoSync, enabled: e.target.checked })} />
+            <span className="sync-toggle-track"><span className="sync-toggle-thumb" /></span>
+            <span className="sync-toggle-label">{autoSync.enabled ? "已开启" : "已关闭"}</span>
+          </label>
+          <select className="sync-interval" value={autoSync.intervalMinutes} onChange={(e) => setAutoSync({ ...autoSync, intervalMinutes: Number(e.target.value) })} disabled={!autoSync.enabled}>
+            <option value={5}>每 5 分钟</option>
+            <option value={15}>每 15 分钟</option>
+            <option value={30}>每 30 分钟</option>
+            <option value={60}>每小时</option>
+          </select>
+          <button className="ghost accent" onClick={() => void saveAutoSync()}>保存</button>
+        </div>
+      </div>
       {sources.length === 0 ? <div className="empty-card"><strong>尚未添加媒体源</strong><p>连接 NAS 目录或 WebDAV 后即可扫描入库。</p><button className="primary" onClick={openCreate}>添加第一个媒体源</button></div> : <div className="source-cards">{sources.map((source) => {
         const job = jobs.find((item) => item.source_id === source.id && ["queued", "running"].includes(item.status));
         const scanPercent = job?.phase === "indexing" && job.discovered ? Math.round(job.processed / job.discovered * 100) : undefined;
