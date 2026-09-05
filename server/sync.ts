@@ -44,7 +44,7 @@ async function tick() {
     for (const { id } of sources) {
       const active = db.prepare("SELECT 1 FROM scan_jobs WHERE source_id=? AND status IN ('queued','running')").get(id);
       if (active) continue;
-      startScan(id);
+      startScan(id, "auto");
       log("sync", `auto-sync started scan for source ${id}`);
     }
   } catch (error) {

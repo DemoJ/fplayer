@@ -134,6 +134,9 @@ app.get("/api/scans", auth, (_req, res) => { const jobs = db.prepare("SELECT j.*
 app.post("/api/sources/:id/scan", auth, admin, (req, res) => { const source = db.prepare("SELECT id FROM sources WHERE id=?").get(req.params.id); if (!source) return res.status(404).json({ error: "媒体源不存在" }); res.status(202).json(startScan(Number(req.params.id))); });
 app.post("/api/scans/:id/stop", auth, admin, (req, res) => stopScan(Number(req.params.id)) ? res.json({ ok: true }) : res.status(409).json({ error: "扫描任务不在运行中" }));
 app.post("/api/scans/:id/acknowledge", auth, admin, (req, res) => { db.prepare("UPDATE scan_jobs SET acknowledged=1 WHERE id=?").run(req.params.id); res.json({ ok: true }); });
+// Acknowledge every finished job at once: the client calls this on page load so
+// scans that finished while nobody was watching never toast retroactively.
+app.post("/api/scans/acknowledge-finished", auth, admin, (_req, res) => { db.prepare("UPDATE scan_jobs SET acknowledged=1 WHERE acknowledged=0 AND status IN ('completed','failed','cancelled')").run(); res.json({ ok: true }); });
 
 // Auto-sync settings: how often the server should run incremental scans
 // to pick up new files added to WebDAV/local sources.
@@ -958,6 +961,9 @@ app.get(/^(?!\/api)(?!\/assets).*/, (_req, res) => res.sendFile(path.resolve("di
 // importing modules for tests stays side-effect free).
 db.prepare("UPDATE scan_jobs SET status='failed',phase='interrupted',error='服务重启，扫描已中断',finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')").run();
 db.prepare("UPDATE metadata_jobs SET status='failed',phase='interrupted',error='服务重启，匹配已中断',finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')").run();
+// Anything that finished before startup is old news; acknowledge it so users
+// are not greeted by a wall of stale scan notifications on the next visit.
+db.prepare("UPDATE scan_jobs SET acknowledged=1 WHERE acknowledged=0 AND status IN ('completed','failed','cancelled')").run();
 rebuildCatalog();
 void sweepStaleDirectories();
 void sweepCache();

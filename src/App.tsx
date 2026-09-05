@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, Route, Routes, useLocation } from "react-router-dom";
 import { api, clearToken, getToken, setOnUnauthorized, setToken, type ScanJob, type User } from "./api";
 import { Home } from "./pages/Home";
@@ -25,9 +25,22 @@ function Auth({ initialized, setupExpired, onLogin, onSetupDone }: { initialized
 function Layout({ user, logout }: { user: User; logout: () => void }) {
   const location = useLocation(); const [jobs, setJobs] = useState<ScanJob[]>([]);
   const cinema = location.pathname.startsWith("/watch/");
+  // Jobs already finished on the first successful fetch predate this session
+  // (e.g. auto-sync ran while the tab was closed). They never toast and are
+  // acknowledged in bulk so they do not linger as unread.
+  const staleIds = useRef(new Set<number>());
+  const firstFetch = useRef(true);
   useEffect(() => {
     let active = true; let timer = 0;
-    const refresh = () => api<ScanJob[]>("/scans").then((rows) => { if (active) setJobs(rows); }).catch(() => {});
+    const refresh = () => api<ScanJob[]>("/scans").then((rows) => {
+      if (!active) return;
+      if (firstFetch.current) {
+        firstFetch.current = false;
+        for (const row of rows) if (["completed", "failed", "cancelled"].includes(row.status)) staleIds.current.add(row.id);
+        if (staleIds.current.size > 0 && user.role === "admin") void api("/scans/acknowledge-finished", { method: "POST" }).catch(() => {});
+      }
+      setJobs(rows);
+    }).catch(() => {});
     refresh();
     // Poll only while there are active jobs; stop the interval once idle.
     // Check current state from a ref to avoid retriggering this effect on every
@@ -42,7 +55,7 @@ function Layout({ user, logout }: { user: User; logout: () => void }) {
     return () => { active = false; if (timer) window.clearInterval(timer); };
   }, []);
   async function dismiss(job: ScanJob) { await api(`/scans/${job.id}/acknowledge`, { method: "POST" }); setJobs((current) => current.filter((item) => item.id !== job.id)); }
-  const finished = jobs.filter((job) => ["completed", "failed", "cancelled"].includes(job.status));
+  const finished = jobs.filter((job) => ["completed", "failed", "cancelled"].includes(job.status) && !staleIds.current.has(job.id));
   return <div className={`shell ${cinema ? "cinema" : ""}`}><aside><Link className="logo" to="/"><span>F</span> FPLAYER</Link><nav><Link className={location.pathname === "/" ? "active" : ""} to="/" aria-label="首页">⌂ <span>首页</span></Link><Link className={location.pathname.startsWith("/movies") ? "active" : ""} to="/movies" aria-label="电影">◫ <span>电影</span></Link><Link className={location.pathname.startsWith("/shows") ? "active" : ""} to="/shows" aria-label="剧集">▤ <span>剧集</span></Link><Link className={location.pathname.startsWith("/admin") ? "active" : ""} to="/admin" aria-label="设置">⚙ <span>设置</span></Link></nav><div className="account"><div className="avatar">{user.username[0].toUpperCase()}</div><div><strong>{user.username}</strong><button onClick={logout}>退出登录</button></div></div></aside><div className="content"><Routes><Route path="/" element={<Home />} /><Route path="/movies" element={<Library kind="movie" />} /><Route path="/shows" element={<Library kind="show" />} /><Route path="/browse" element={<BrowseView />} /><Route path="/browse/:sourceId" element={<BrowseView />} /><Route path="/work/:id" element={<WorkDetail />} /><Route path="/media/:id" element={<Detail />} /><Route path="/watch/:id" element={<PlayerRoute />} /><Route path="/admin" element={<SourceAdmin user={user} jobs={jobs} refreshJobs={(rows) => setJobs(rows)} />} /></Routes></div>{finished.length > 0 && <div className="notifications">{finished.map((job) => <article className={`toast ${job.status}`} key={job.id}><div><strong>{job.source_name}：{job.status === "completed" ? "扫描完成" : job.status === "cancelled" ? "扫描已停止" : "扫描失败"}</strong><p>{job.status === "completed" ? `共发现并更新 ${job.result_count || 0} 个媒体文件` : job.error}</p></div><button aria-label="关闭" onClick={() => dismiss(job)}>×</button></article>)}</div>}</div>;
 }
 

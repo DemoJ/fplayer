@@ -3,7 +3,7 @@ export type Media = { id: number; title: string; kind: "movie" | "show"; season?
 export type Work = { id: number; title: string; original_title?: string; kind: "movie" | "show"; year?: number; overview?: string; poster_path?: string; backdrop_path?: string; file_count: number; season_count: number };
 export type UpNext = { id: number; title: string; kind: "show"; season: number; episode: number; duration?: number; size?: number; container?: string; work_id: number; work_title: string; work_poster?: string; source_name?: string; from_season: number; from_episode: number };
 export type Source = { id: number; name: string; type: "local" | "webdav"; base_path: string; username?: string; last_scan_at?: string; last_error?: string; file_count?: number };
-export type ScanJob = { id: number; source_id: number; source_name?: string; status: "queued" | "running" | "completed" | "failed" | "cancelled"; phase: string; discovered: number; processed: number; result_count: number | null; error: string | null };
+export type ScanJob = { id: number; source_id: number; source_name?: string; status: "queued" | "running" | "completed" | "failed" | "cancelled"; phase: string; discovered: number; processed: number; result_count: number | null; error: string | null; origin?: "manual" | "auto" };
 export type BrowseFolder = { name: string; path: string; file_count: number };
 export type BrowseResult = { level: "sources" | "folder"; path: string; crumbs: Array<{ name: string; path: string }>; source?: Source; sources: Source[]; folders: BrowseFolder[]; files: Media[] };
 

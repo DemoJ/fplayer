@@ -91,6 +91,7 @@ db.exec(`
     result_count INTEGER,
     error TEXT,
     acknowledged INTEGER NOT NULL DEFAULT 0,
+    origin TEXT NOT NULL DEFAULT 'manual',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     started_at TEXT,
     finished_at TEXT
@@ -126,3 +127,9 @@ if (!hasColumn("work_id")) db.exec("ALTER TABLE media ADD COLUMN work_id INTEGER
 if (!hasColumn("subtitle_codec")) db.exec("ALTER TABLE media ADD COLUMN subtitle_codec TEXT");
 if (!hasColumn("trashed")) db.exec("ALTER TABLE media ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0");
 if (!hasColumn("trashed_at")) db.exec("ALTER TABLE media ADD COLUMN trashed_at TEXT");
+
+// origin marks who started a scan: 'manual' (admin clicked) or 'auto'
+// (scheduled auto-sync). Auto scans are acknowledged when they finish so they
+// never pile up as unread notifications.
+const scanJobColumns = db.prepare("PRAGMA table_info(scan_jobs)").all() as Array<{ name: string }>;
+if (!scanJobColumns.some((column) => column.name === "origin")) db.exec("ALTER TABLE scan_jobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'");
