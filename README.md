@@ -4,9 +4,13 @@
 
 ## 界面预览
 
-| 首页 | 剧集库 |
-| :---: | :---: |
-| ![首页](docs/screenshots/home.png) | ![剧集库](docs/screenshots/shows.png) |
+| 首页 |
+| :---: |
+| ![首页](docs/screenshots/home.png) |
+
+| 剧集库 |
+| :---: |
+| ![剧集库](docs/screenshots/shows.png) |
 
 | 详情页（豆瓣元数据与剧集列表自动匹配） |
 | :---: |
