@@ -35,13 +35,26 @@ export function useCloseOnOutside(menuId: number | undefined, setMenuId: React.D
   }, [menuId, selector, setMenuId]);
 }
 
-export function WorkSection({ title, items, loading, refreshingId, onRefresh, total, loadingMore, onLoadMore }: { title: string; items: Work[]; loading?: boolean; refreshingId?: number; onRefresh?: (id: number) => void; total?: number; loadingMore?: boolean; onLoadMore?: () => void }) {
+export function WorkSection({ title, items, loading, refreshingId, onRefresh, total, loadingMore, onLoadMore, onDeleted }: { title: string; items: Work[]; loading?: boolean; refreshingId?: number; onRefresh?: (id: number) => void; total?: number; loadingMore?: boolean; onLoadMore?: () => void; onDeleted?: (id: number) => void }) {
   const [menuId, setMenuId] = useState<number>();
   const [manageWork, setManageWork] = useState<Work>();
   useCloseOnOutside(menuId, setMenuId, ".media-menu, .media-more");
+  async function deleteWork(item: Work) {
+    setMenuId(undefined);
+    const label = item.kind === "show" ? "剧集" : "电影";
+    const count = item.file_count || 0;
+    const detail = count > 0
+      ? `将直接删除它所在的整个文件夹（含 ${count} 个视频文件），文件无法恢复。`
+      : "将删除该作品及其文件记录。";
+    if (!window.confirm(`确定删除${label}「${item.title}」吗？\n${detail}`)) return;
+    try {
+      await api(`/works/${item.id}`, { method: "DELETE" });
+      onDeleted?.(item.id);
+    } catch (error) { window.alert((error as Error).message); }
+  }
   return <section className="media-section">
     <div className="section-heading"><h2>{title}</h2><span>{total !== undefined ? `${items.length} / ${total} 部` : `${items.length} 部`}</span></div>
-    {loading ? <div className="empty">正在整理作品...</div> : items.length === 0 ? <div className="empty"><strong>银幕还没有亮起</strong><span>前往“设置”扫描你的影视目录。</span><Link className="text-link" to="/admin">打开设置 →</Link></div> : <div className="poster-grid">{items.map((item, index) => <article className="media-card" key={item.id}><Link className="poster-card" to={`/work/${item.id}`}><PosterBg path={item.poster_path} className={`poster art-${index % 6}`}><span>{item.kind === "show" ? "SERIES" : "FILM"}</span><b>{item.poster_path ? "" : item.title.slice(0, 1)}</b></PosterBg><h3>{item.title}</h3><p>{item.year || "未匹配年份"} · {item.kind === "show" ? `${item.season_count} 季` : `${item.file_count} 个版本`}</p></Link><button className="media-more" type="button" aria-label="更多操作" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setMenuId(menuId === item.id ? undefined : item.id); }}>⋯</button>{menuId === item.id && <div className="media-menu"><button type="button" disabled={refreshingId === item.id} onClick={() => { setMenuId(undefined); onRefresh?.(item.id); }}>{refreshingId === item.id ? "刮削中..." : "重新刮削"}</button><button type="button" onClick={() => { setMenuId(undefined); setManageWork(item); }}>编辑文件信息</button><button type="button" className="danger-text" onClick={() => { setMenuId(undefined); setManageWork(item); }}>删除文件</button></div>}</article>)}</div>}
+    {loading ? <div className="empty">正在整理作品...</div> : items.length === 0 ? <div className="empty"><strong>银幕还没有亮起</strong><span>前往“设置”扫描你的影视目录。</span><Link className="text-link" to="/admin">打开设置 →</Link></div> : <div className="poster-grid">{items.map((item, index) => <article className="media-card" key={item.id}><Link className="poster-card" to={`/work/${item.id}`}><PosterBg path={item.poster_path} className={`poster art-${index % 6}`}><span>{item.kind === "show" ? "SERIES" : "FILM"}</span><b>{item.poster_path ? "" : item.title.slice(0, 1)}</b></PosterBg><h3>{item.title}</h3><p>{item.year || "未匹配年份"} · {item.kind === "show" ? `${item.season_count} 季` : `${item.file_count} 个版本`}</p></Link><button className="media-more" type="button" aria-label="更多操作" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setMenuId(menuId === item.id ? undefined : item.id); }}>⋯</button>{menuId === item.id && <div className="media-menu"><button type="button" disabled={refreshingId === item.id} onClick={() => { setMenuId(undefined); onRefresh?.(item.id); }}>{refreshingId === item.id ? "刮削中..." : "重新刮削"}</button><button type="button" onClick={() => { setMenuId(undefined); setManageWork(item); }}>编辑文件信息</button><button type="button" className="danger-text" onClick={() => { setMenuId(undefined); setManageWork(item); }}>删除文件</button><button type="button" className="danger-text" onClick={() => void deleteWork(item)}>{item.kind === "show" ? "删除剧集" : "删除电影"}</button></div>}</article>)}</div>}
     {manageWork && <WorkFilesDialog work={manageWork} onClose={() => setManageWork(undefined)} />}
     {!loading && total !== undefined && items.length < total && <div className="load-more-row"><button className="secondary" type="button" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "加载中..." : "加载更多"}</button></div>}
   </section>;
@@ -50,19 +63,17 @@ export function WorkSection({ title, items, loading, refreshingId, onRefresh, to
 export function WorkFilesDialog({ work, onClose }: { work: Work; onClose: () => void }) {
   const [data, setData] = useState<{ work: Work; media: Media[] }>();
   const [editing, setEditing] = useState<Media>();
-  const [undo, setUndo] = useState<{ message: string; onUndo: () => void }>();
   useEffect(() => { api<{ work: Work; media: Media[] }>(`/works/${work.id}`).then(setData); }, [work.id]);
   if (!data) return <div className="drawer-mask" onClick={onClose}><div className="drawer" onClick={(e) => e.stopPropagation()}><div className="empty">正在读取文件...</div></div></div>;
   async function remove(item: Media) {
-    if (!window.confirm(`确定将「${item.path.split("/").pop()}」移到回收站吗？可随时恢复。`)) return;
+    if (!window.confirm(`确定将「${item.path.split("/").pop()}」删除吗？文件将被直接删除，无法恢复。`)) return;
     try {
       await api(`/media/${item.id}`, { method: "DELETE" });
       setData((current) => current ? { ...current, media: current.media.filter((file) => file.id !== item.id) } : current);
-      setUndo({ message: "已移至回收站", onUndo: () => { void api(`/media/${item.id}/restore`, { method: "POST" }).catch(() => {}); api<{ work: Work; media: Media[] }>(`/works/${work.id}`).then(setData); } });
     }
     catch (error) { window.alert((error as Error).message); }
   }
-  return <div className="drawer-mask" onClick={onClose}><div className="drawer" onClick={(e) => e.stopPropagation()}><div className="drawer-head"><div><span className="eyebrow">MEDIA FILES</span><h2>{work.title}</h2></div><button type="button" className="icon-close" aria-label="关闭" onClick={onClose}>×</button></div><p className="drawer-desc">这里管理该作品下的全部媒体文件。编辑会同步修改实际文件信息，删除会移至回收站。</p>{undo && <div className="admin-toast">{undo.message}<button type="button" onClick={undo.onUndo}>撤销</button><button type="button" aria-label="关闭" onClick={() => setUndo(undefined)}>×</button></div>}<div className="work-files-list">{data.media.length === 0 ? <div className="empty">没有可用文件</div> : data.media.map((item) => <div className="work-file-row" key={item.id}><div><strong>{item.kind === "show" && item.season ? `S${String(item.season).padStart(2, "0")}E${String(item.episode || 0).padStart(2, "0")}` : item.title}</strong><small>{item.path.split("/").pop()}</small></div><div><button className="ghost" type="button" onClick={() => setEditing(item)}>编辑</button><button className="ghost danger" type="button" onClick={() => void remove(item)}>删除</button></div></div>)}</div><div className="drawer-actions"><button type="button" className="secondary" onClick={onClose}>关闭</button></div>{editing && <MediaEditDialog item={editing} onClose={() => setEditing(undefined)} onSaved={() => { setEditing(undefined); onClose(); }} />}</div></div>;
+  return <div className="drawer-mask" onClick={onClose}><div className="drawer" onClick={(e) => e.stopPropagation()}><div className="drawer-head"><div><span className="eyebrow">MEDIA FILES</span><h2>{work.title}</h2></div><button type="button" className="icon-close" aria-label="关闭" onClick={onClose}>×</button></div><p className="drawer-desc">这里管理该作品下的全部媒体文件。编辑会同步修改实际文件信息，删除会直接从磁盘删除文件。</p><div className="work-files-list">{data.media.length === 0 ? <div className="empty">没有可用文件</div> : data.media.map((item) => <div className="work-file-row" key={item.id}><div><strong>{item.kind === "show" && item.season ? `S${String(item.season).padStart(2, "0")}E${String(item.episode || 0).padStart(2, "0")}` : item.title}</strong><small>{item.path.split("/").pop()}</small></div><div><button className="ghost" type="button" onClick={() => setEditing(item)}>编辑</button><button className="ghost danger" type="button" onClick={() => void remove(item)}>删除</button></div></div>)}</div><div className="drawer-actions"><button type="button" className="secondary" onClick={onClose}>关闭</button></div>{editing && <MediaEditDialog item={editing} onClose={() => setEditing(undefined)} onSaved={() => { setEditing(undefined); onClose(); }} />}</div></div>;
 }
 
 export function MediaSection({ title, items, loading, wide = false, emptyText }: { title: string; items: Media[]; loading?: boolean; wide?: boolean; emptyText?: string }) {
@@ -81,15 +92,11 @@ export function MediaSection({ title, items, loading, wide = false, emptyText }:
   useEffect(() => () => { if (undoRef.current) window.clearTimeout(undoRef.current); }, []);
   useCloseOnOutside(menuId, setMenuId, ".media-menu, .media-more");
   async function remove(item: Media) {
-    if (!window.confirm(`确定将「${item.title}」移到回收站吗？可随时恢复。`)) return;
+    if (!window.confirm(`确定将「${item.title}」删除吗？文件将被直接删除，无法恢复。`)) return;
     try {
       await api(`/media/${item.id}`, { method: "DELETE" });
       setRemoved((current) => new Set(current).add(item.id));
       setMenuId(undefined);
-      showUndo("已移至回收站", () => {
-        void api(`/media/${item.id}/restore`, { method: "POST" }).catch(() => {});
-        setRemoved((current) => { const next = new Set(current); next.delete(item.id); return next; });
-      });
     } catch (error) {
       window.alert((error as Error).message);
       setMenuId(undefined);

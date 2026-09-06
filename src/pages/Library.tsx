@@ -46,12 +46,17 @@ export function Library({ kind }: { kind: "movie" | "show" }) {
     } catch (error) { setMessage((error as Error).message); }
     finally { setRefreshingId(undefined); }
   }
+  function handleDeleted(id: number) {
+    setItems((current) => current.filter((item) => item.id !== id));
+    setTotal((current) => Math.max(0, current - 1));
+    setMessage("已删除，整个文件夹已从磁盘移除");
+  }
   return <main>
     <header className="topbar">
       <div><span className="eyebrow">PRIVATE CINEMA</span><h1>{kind === "movie" ? "电影" : "剧集"}</h1></div>
       <label className="search">⌕<input placeholder="搜索片名" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
     </header>
     {message && <div className="admin-toast">{message}<button type="button" aria-label="关闭" onClick={() => setMessage("")}>×</button></div>}
-    <WorkSection title={`全部${kind === "movie" ? "电影" : "剧集"}`} items={items} loading={loading} refreshingId={refreshingId} onRefresh={refreshItem} total={total} loadingMore={loadingMore} onLoadMore={() => void loadMore()} />
+    <WorkSection title={`全部${kind === "movie" ? "电影" : "剧集"}`} items={items} loading={loading} refreshingId={refreshingId} onRefresh={refreshItem} total={total} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDeleted={handleDeleted} />
   </main>;
 }

@@ -233,7 +233,7 @@ export async function refreshWorkMetadata(workId: number) {
   const work = db.prepare("SELECT * FROM works WHERE id=?").get(workId) as any;
   if (!work) throw new Error("作品不存在");
 
-  const media = db.prepare("SELECT path FROM media WHERE work_id=? AND available=1 AND trashed=0 ORDER BY id LIMIT 1").get(workId) as { path: string } | undefined;
+  const media = db.prepare("SELECT path FROM media WHERE work_id=? AND available=1 ORDER BY id LIMIT 1").get(workId) as { path: string } | undefined;
   const identified = media ? identify(media.path) : null;
   const query = identified?.title || work.title;
   const workKind = identified?.kind || work.kind;

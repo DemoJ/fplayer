@@ -37,7 +37,7 @@ function UpNextSection({ items, loading }: { items: UpNext[]; loading: boolean }
     catch (error) { window.alert((error as Error).message); }
   }
   async function remove(item: UpNext) {
-    if (!window.confirm(`确定将「${item.work_title} S${pad(item.season)}E${pad(item.episode)}」移到回收站吗？可随时恢复。`)) return;
+    if (!window.confirm(`确定将「${item.work_title} S${pad(item.season)}E${pad(item.episode)}」删除吗？文件将被直接删除，无法恢复。`)) return;
     setMenuId(undefined);
     try { await api(`/media/${item.id}`, { method: "DELETE" }); window.location.reload(); }
     catch (error) { window.alert((error as Error).message); }

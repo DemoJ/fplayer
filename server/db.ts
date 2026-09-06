@@ -125,8 +125,6 @@ const mediaColumns = db.prepare("PRAGMA table_info(media)").all() as Array<{ nam
 const hasColumn = (name: string) => mediaColumns.some((column) => column.name === name);
 if (!hasColumn("work_id")) db.exec("ALTER TABLE media ADD COLUMN work_id INTEGER REFERENCES works(id) ON DELETE SET NULL");
 if (!hasColumn("subtitle_codec")) db.exec("ALTER TABLE media ADD COLUMN subtitle_codec TEXT");
-if (!hasColumn("trashed")) db.exec("ALTER TABLE media ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0");
-if (!hasColumn("trashed_at")) db.exec("ALTER TABLE media ADD COLUMN trashed_at TEXT");
 
 // origin marks who started a scan: 'manual' (admin clicked) or 'auto'
 // (scheduled auto-sync). Auto scans are acknowledged when they finish so they

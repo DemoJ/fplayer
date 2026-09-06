@@ -7,7 +7,7 @@ import express from "express";
 import { db } from "./db.js";
 import { config } from "./config.js";
 import { encrypt, hashPassword, hashToken, newSessionToken, signTranscode, verifyPassword, verifyTranscodeSig } from "./security.js";
-import { mediaInputUrl, probe, sourceFile, acquireCredentialProxy, webdavHeaders, withCredentialProxy, type CredentialProxy } from "./media.js";
+import { mediaInputUrl, probe, sourceFile, acquireCredentialProxy, webdavHeaders, withCredentialProxy, deleteWorkEntirely, type CredentialProxy } from "./media.js";
 import { activeCount, destroy, get, maxConcurrent, owns, register, activeSessionFor, producedSeq, withLock } from "./transcodes.js";
 import { absSeq, blockHead, buildPlaylist, contiguousFrom, ensureCacheDir, fileExists, listSegments, readMeta, segSecFor, segmentFile, sweepCache, sweepStaleDirectories, touch, writeMeta, REMUX_SEGMENT_SECONDS, TRANSCODE_SEGMENT_SECONDS } from "./transcode-cache.js";
 import { startScan, stopScan } from "./scans.js";
@@ -174,13 +174,13 @@ app.post("/api/works/:id/metadata/refresh", auth, admin, async (req, res) => {
   }
 });
 app.get("/api/posters/:file", auth, (req, res) => res.sendFile(path.join(config.dataDir, "posters", path.basename(String(req.params.file)))));
-app.get("/api/media", auth, (req: AuthRequest, res) => { const q = String(req.query.q || ""); const kind = String(req.query.kind || ""); const rows = db.prepare(`SELECT m.*, p.position, p.duration AS progress_duration, p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.available=1 AND m.trashed=0 AND m.title LIKE ? AND (?='' OR m.kind=?) ORDER BY m.title COLLATE NOCASE`).all(req.user!.id, `%${q}%`, kind, kind); res.json(rows); });
+app.get("/api/media", auth, (req: AuthRequest, res) => { const q = String(req.query.q || ""); const kind = String(req.query.kind || ""); const rows = db.prepare(`SELECT m.*, p.position, p.duration AS progress_duration, p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.available=1 AND m.title LIKE ? AND (?='' OR m.kind=?) ORDER BY m.title COLLATE NOCASE`).all(req.user!.id, `%${q}%`, kind, kind); res.json(rows); });
 app.get("/api/continue", auth, (req: AuthRequest, res) => {
   const limit = Math.min(24, Math.max(1, Number(req.query.limit) || 12));
   const rows = db.prepare(`
     SELECT m.*, p.position, p.duration AS progress_duration, p.completed, p.updated_at AS last_watched_at, s.name AS source_name, w.poster_path AS work_poster
     FROM progress p
-    JOIN media m ON m.id = p.media_id AND m.available=1 AND m.trashed=0
+    JOIN media m ON m.id = p.media_id AND m.available=1
     JOIN sources s ON s.id = m.source_id
     LEFT JOIN works w ON w.id = m.work_id
     WHERE p.user_id = ? AND p.completed = 0 AND p.position > 5
@@ -207,7 +207,7 @@ app.get("/api/up-next", auth, (req: AuthRequest, res) => {
     pairs AS (
       SELECT m.work_id, m.season AS s, m.episode AS e
       FROM media m
-      WHERE m.available=1 AND m.trashed=0 AND m.season IS NOT NULL AND m.episode IS NOT NULL
+      WHERE m.available=1 AND m.season IS NOT NULL AND m.episode IS NOT NULL
       GROUP BY m.work_id, m.season, m.episode
     ),
     next_pair AS (
@@ -221,7 +221,7 @@ app.get("/api/up-next", auth, (req: AuthRequest, res) => {
       SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.work_id, m.season, m.episode ORDER BY m.size DESC, m.id) AS rn
       FROM media m
       JOIN np ON np.work_id = m.work_id AND np.ns = m.season AND np.ne = m.episode
-      WHERE m.available=1 AND m.trashed=0
+      WHERE m.available=1
     )
     SELECT t.id, t.title, t.kind, t.season, t.episode, t.duration, t.size, t.container, t.work_id,
            w.title AS work_title, w.poster_path AS work_poster, s.name AS source_name,
@@ -245,7 +245,7 @@ app.get("/api/recent", auth, (req: AuthRequest, res) => {
     JOIN sources s ON s.id = m.source_id
     LEFT JOIN progress p ON p.media_id = m.id AND p.user_id = ?
     LEFT JOIN works w ON w.id = m.work_id
-    WHERE m.available=1 AND m.trashed=0
+    WHERE m.available=1
     ORDER BY m.id DESC
     LIMIT ?
   `).all(req.user!.id, limit);
@@ -273,7 +273,7 @@ app.get("/api/browse", auth, (req: AuthRequest, res) => {
     const sources = db.prepare(`
       SELECT s.id, s.name, s.type, s.base_path, COUNT(m.id) AS file_count
       FROM sources s
-      LEFT JOIN media m ON m.source_id = s.id AND m.available=1 AND m.trashed=0
+      LEFT JOIN media m ON m.source_id = s.id AND m.available=1
       GROUP BY s.id
       ORDER BY s.name COLLATE NOCASE
     `).all();
@@ -292,7 +292,7 @@ app.get("/api/browse", auth, (req: AuthRequest, res) => {
            p.position, p.duration AS progress_duration, p.completed
     FROM media m
     LEFT JOIN progress p ON p.media_id = m.id AND p.user_id = ?
-    WHERE m.source_id = ? AND m.available=1 AND m.trashed=0
+    WHERE m.source_id = ? AND m.available=1
     ORDER BY m.path COLLATE NOCASE
   `).all(req.user!.id, sourceId) as Array<any>;
   const folderMap = new Map<string, number>();
@@ -329,11 +329,23 @@ app.get("/api/works", auth, (req: AuthRequest, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 60));
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const totalRow = db.prepare("SELECT COUNT(*) AS count FROM works WHERE title LIKE ? AND (?='' OR kind=?)").get(`%${q}%`, kind, kind) as { count: number };
-  const rows = db.prepare(`SELECT w.*,COUNT(DISTINCT m.id) AS file_count,COUNT(DISTINCT CASE WHEN m.season IS NOT NULL THEN m.season END) AS season_count,MAX(p.updated_at) AS last_watched_at FROM works w LEFT JOIN media m ON m.work_id=w.id AND m.available=1 AND m.trashed=0 LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE w.title LIKE ? AND (?='' OR w.kind=?) GROUP BY w.id ORDER BY w.title COLLATE NOCASE LIMIT ? OFFSET ?`).all(req.user!.id, `%${q}%`, kind, kind, limit, offset);
+  const rows = db.prepare(`SELECT w.*,COUNT(DISTINCT m.id) AS file_count,COUNT(DISTINCT CASE WHEN m.season IS NOT NULL THEN m.season END) AS season_count,MAX(p.updated_at) AS last_watched_at FROM works w LEFT JOIN media m ON m.work_id=w.id AND m.available=1 LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE w.title LIKE ? AND (?='' OR w.kind=?) GROUP BY w.id ORDER BY w.title COLLATE NOCASE LIMIT ? OFFSET ?`).all(req.user!.id, `%${q}%`, kind, kind, limit, offset);
   res.json({ items: rows, total: totalRow.count });
 });
-app.get("/api/works/:id", auth, (req, res) => { const work = db.prepare("SELECT * FROM works WHERE id=?").get(req.params.id); if (!work) return res.status(404).json({ error: "作品不存在" }); const media = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.work_id=? AND m.available=1 AND m.trashed=0 ORDER BY m.season,m.episode,m.size DESC").all((req as AuthRequest).user!.id, req.params.id); res.json({ work, media }); });
-app.get("/api/media/:id", auth, (req: AuthRequest, res) => { const row = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name,s.type AS source_type FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=? AND m.trashed=0").get(req.user!.id, req.params.id); row ? res.json(row) : res.status(404).json({ error: "媒体不存在" }); });
+app.get("/api/works/:id", auth, (req, res) => { const work = db.prepare("SELECT * FROM works WHERE id=?").get(req.params.id); if (!work) return res.status(404).json({ error: "作品不存在" }); const media = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed FROM media m LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.work_id=? AND m.available=1 ORDER BY m.season,m.episode,m.size DESC").all((req as AuthRequest).user!.id, req.params.id); res.json({ work, media }); });
+// Whole-work deletion: removes the series/movie folder from the source (not
+// just the DB entries), so the user does not have to confirm episode by
+// episode. All deletions in this app are direct and unrecoverable.
+app.delete("/api/works/:id", auth, admin, async (req, res) => {
+  try {
+    const result = await deleteWorkEntirely(Number(req.params.id));
+    log("works", `deleted work=${req.params.id} files=${result.files} folders=${result.folders.join(",") || "none"}`);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "删除失败" });
+  }
+});
+app.get("/api/media/:id", auth, (req: AuthRequest, res) => { const row = db.prepare("SELECT m.*,p.position,p.duration AS progress_duration,p.completed,s.name source_name,s.type AS source_type FROM media m JOIN sources s ON s.id=m.source_id LEFT JOIN progress p ON p.media_id=m.id AND p.user_id=? WHERE m.id=?").get(req.user!.id, req.params.id); row ? res.json(row) : res.status(404).json({ error: "媒体不存在" }); });
 // Probes a media file (ffprobe reading the source directly) and caches the
 // codec info in the media row. The player uses this to decide whether the
 // browser can play the file natively or whether it must go through
@@ -361,7 +373,7 @@ app.post("/api/media/:id/probe", auth, openMedia, async (req: AuthRequest, res) 
   }
 });
 app.put("/api/media/:id", auth, admin, async (req, res) => {
-  const media = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1 AND m.trashed=0").get(req.params.id) as any;
+  const media = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(req.params.id) as any;
   if (!media) return res.status(404).json({ error: "媒体不存在" });
   const requestedName = typeof req.body?.name === "string" ? req.body.name.trim() : path.basename(media.path);
   const name = path.basename(requestedName);
@@ -390,22 +402,33 @@ app.put("/api/media/:id", auth, admin, async (req, res) => {
     res.status(400).json({ error: error instanceof Error ? error.message : "修改文件失败" });
   }
 });
-app.delete("/api/media/:id", auth, admin, (_req, res) => {
-  // Soft delete: the file stays on disk and the entry moves to the trash bin.
-  // Undo (restore) or permanent deletion (trash/empty) are available in admin.
-  const result = db.prepare("UPDATE media SET trashed=1,trashed_at=CURRENT_TIMESTAMP WHERE id=? AND available=1").run(_req.params.id);
-  if (!result.changes) return res.status(404).json({ error: "媒体不存在" });
-  res.json({ ok: true });
-});
-app.post("/api/media/:id/restore", auth, admin, (req, res) => {
-  const result = db.prepare("UPDATE media SET trashed=0,trashed_at=NULL WHERE id=?").run(req.params.id);
-  if (!result.changes) return res.status(404).json({ error: "媒体不存在" });
+app.delete("/api/media/:id", auth, admin, async (req, res) => {
+  // Direct deletion: removes the file from the source and the DB row. There is
+  // no trash bin — the client's confirm dialog states this is unrecoverable.
+  // A file that is already gone still counts as deleted.
+  const media = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(req.params.id) as any;
+  if (!media) return res.status(404).json({ error: "媒体不存在" });
+  try {
+    if (media.type === "local") {
+      await fs.unlink(path.join(media.base_path, media.path)).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    } else {
+      const source = { type: media.type, base_path: media.base_path, username: media.username, secret: media.secret } as Source;
+      const response = await fetch(sourceFile(source, media.path), { method: "DELETE", headers: webdavHeaders(source) });
+      if (!response.ok && response.status !== 404) throw new Error(`WebDAV 删除失败 (${response.status})`);
+    }
+  } catch (error) {
+    return res.status(400).json({ error: error instanceof Error ? error.message : "删除失败" });
+  }
+  db.prepare("DELETE FROM progress WHERE media_id=?").run(media.id);
+  db.prepare("DELETE FROM media WHERE id=?").run(media.id);
   res.json({ ok: true });
 });
 app.post("/api/media/:id/remove-from-list", auth, (req: AuthRequest, res) => {
   // 「移除」只清理首页列表（继续播放/接下来）的数据来源（progress 观看记录），
   // 不触碰文件本身。重新观看会自动重建记录，条目随即回到列表。
-  const media = db.prepare("SELECT id, work_id FROM media WHERE id=? AND available=1 AND trashed=0").get(req.params.id) as { id: number; work_id: number | null } | undefined;
+  const media = db.prepare("SELECT id, work_id FROM media WHERE id=? AND available=1").get(req.params.id) as { id: number; work_id: number | null } | undefined;
   if (!media) return res.status(404).json({ error: "媒体不存在" });
   const removed: Array<{ media_id: number; position: number; duration: number }> = [];
   const take = (mediaId: number) => {
@@ -424,81 +447,6 @@ app.post("/api/media/:id/remove-from-list", auth, (req: AuthRequest, res) => {
   }
   res.json({ ok: true, removed });
 });
-app.get("/api/trash", auth, admin, (_req, res) => {
-  const rows = db.prepare(`
-    SELECT m.id, m.title, m.path, m.size, m.season, m.episode, m.kind, s.name AS source_name
-    FROM media m JOIN sources s ON s.id=m.source_id
-    WHERE m.trashed=1 ORDER BY m.id DESC
-  `).all();
-  res.json(rows);
-});
-app.post("/api/trash/empty", auth, admin, async (_req, res) => {
-  // Permanently delete the underlying files of trashed entries. Entries whose
-  // file could not be removed (source unreachable, permissions...) are kept so
-  // the user can retry; a file that is already gone counts as removed.
-  const rows = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.trashed=1").all() as any[];
-  let removed = 0;
-  for (const media of rows) {
-    try {
-      if (media.type === "local") {
-        await fs.unlink(path.join(media.base_path, media.path)).catch((error) => {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        });
-      } else {
-        const source = { type: media.type, base_path: media.base_path, username: media.username, secret: media.secret } as Source;
-        const response = await fetch(sourceFile(source, media.path), { method: "DELETE", headers: webdavHeaders(source) });
-        if (!response.ok && response.status !== 404) throw new Error(`WebDAV 删除失败 (${response.status})`);
-      }
-    } catch {
-      continue; // keep the entry for a retry
-    }
-    db.prepare("DELETE FROM media WHERE id=?").run(media.id);
-    removed++;
-  }
-  res.json({ ok: true, removed });
-});
-app.delete("/api/trash/:id", auth, admin, async (req, res) => {
-  // Permanently delete a single trashed entry.
-  const media = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.trashed=1").get(req.params.id) as any;
-  if (!media) return res.status(404).json({ error: "回收站条目不存在" });
-  try {
-    if (media.type === "local") {
-      await fs.unlink(path.join(media.base_path, media.path)).catch((error) => {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      });
-    } else {
-      const source = { type: media.type, base_path: media.base_path, username: media.username, secret: media.secret } as Source;
-      const response = await fetch(sourceFile(source, media.path), { method: "DELETE", headers: webdavHeaders(source) });
-      if (!response.ok && response.status !== 404) throw new Error(`WebDAV 删除失败 (${response.status})`);
-    }
-  } catch (error) {
-    return res.status(400).json({ error: error instanceof Error ? error.message : "删除失败" });
-  }
-  db.prepare("DELETE FROM media WHERE id=?").run(media.id);
-  res.json({ ok: true });
-});
-// Trash entries older than the retention window are purged automatically at
-// startup and once a day, so a forgotten trash bin cannot fill the disk.
-const TRASH_RETENTION_DAYS = 30;
-async function purgeExpiredTrash() {
-  const rows = db.prepare("SELECT m.*,s.type,s.base_path,s.username,s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.trashed=1 AND m.trashed_at IS NOT NULL AND m.trashed_at < datetime('now',?)").all(`-${TRASH_RETENTION_DAYS} days`) as any[];
-  for (const media of rows) {
-    try {
-      if (media.type === "local") {
-        await fs.unlink(path.join(media.base_path, media.path)).catch((error) => {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        });
-      } else {
-        const source = { type: media.type, base_path: media.base_path, username: media.username, secret: media.secret } as Source;
-        const response = await fetch(sourceFile(source, media.path), { method: "DELETE", headers: webdavHeaders(source) });
-        if (!response.ok && response.status !== 404) throw new Error(`WebDAV 删除失败 (${response.status})`);
-      }
-    } catch {
-      continue;
-    }
-    db.prepare("DELETE FROM media WHERE id=?").run(media.id);
-  }
-}
 app.put("/api/media/:id/progress", auth, (req: AuthRequest, res) => {
   const duration = Math.max(0, Number(req.body?.duration) || 0);
   const position = Math.min(Math.max(0, Number(req.body?.position) || 0), duration);
@@ -514,7 +462,7 @@ async function openMedia(req: AuthRequest, res: express.Response, next: express.
   const id = Number(req.params.id ?? req.params.mediaId);
   // Select source fields explicitly: `s.*` would overwrite m.id with the
   // source id, breaking every downstream use of media.id.
-  const media = db.prepare("SELECT m.id, m.path media_path, m.size media_size, m.source_id, m.subtitle_codec, s.type, s.base_path, s.username, s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1 AND m.trashed=0").get(id) as any;
+  const media = db.prepare("SELECT m.id, m.path media_path, m.size media_size, m.source_id, m.subtitle_codec, s.type, s.base_path, s.username, s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.id=? AND m.available=1").get(id) as any;
   if (!media) return res.status(404).end(); (req as any).media = media; next();
 }
 app.get("/api/media/:id/file", auth, openMedia, async (req: AuthRequest, res) => {
@@ -969,8 +917,5 @@ void sweepStaleDirectories();
 void sweepCache();
 const cacheSweepTimer = setInterval(() => void sweepCache(), 10 * 60 * 1000);
 cacheSweepTimer.unref();
-void purgeExpiredTrash();
-const trashPurgeTimer = setInterval(() => void purgeExpiredTrash(), 24 * 60 * 60 * 1000);
-trashPurgeTimer.unref();
 startAutoSync();
 app.listen(config.port, () => console.log(`FPlayer listening on :${config.port}`));

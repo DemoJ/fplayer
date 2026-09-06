@@ -3,8 +3,6 @@ import { api, type ScanJob, type Source, type User } from "../api";
 
 const emptySourceForm = { name: "", type: "webdav", basePath: "", username: "", password: "" };
 
-type TrashItem = { id: number; title: string; path: string; size?: number; season?: number; episode?: number; kind: string; source_name: string };
-
 export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: ScanJob[]; refreshJobs: (jobs: ScanJob[]) => void }) {
   const [sources, setSources] = useState<Source[]>([]);
   const [editingId, setEditingId] = useState<number>();
@@ -17,29 +15,13 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
   const [showDouban, setShowDouban] = useState(false);
   const [autoSync, setAutoSync] = useState<{ enabled: boolean; intervalMinutes: number }>({ enabled: true, intervalMinutes: 15 });
   const [busyId, setBusyId] = useState<number>();
-  const [trash, setTrash] = useState<TrashItem[]>([]);
   const [showPassword, setShowPassword] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const load = () => api<Source[]>("/sources").then(setSources);
-  const loadTrash = () => api<TrashItem[]>("/trash").then(setTrash).catch(() => {});
   const loadMeta = () => api<typeof meta>("/metadata/status").then(setMeta).catch(() => {});
   const loadDoubanSettings = () => api<{ cookies: string; avoidRiskControl: boolean }>("/metadata/settings").then((s) => setDoubanForm({ cookies: s.cookies || "", avoidRiskControl: s.avoidRiskControl !== false })).catch(() => {});
   const loadAutoSync = () => api<{ enabled: boolean; intervalMinutes: number }>("/settings/auto-sync").then(setAutoSync).catch(() => {});
-  useEffect(() => { load(); loadMeta(); loadDoubanSettings(); loadTrash(); loadAutoSync(); }, []);
-  async function restoreTrashItem(id: number) {
-    try { await api(`/media/${id}/restore`, { method: "POST" }); setMessage("已从回收站恢复"); await loadTrash(); }
-    catch (error) { setMessage((error as Error).message); }
-  }
-  async function emptyTrash() {
-    if (!window.confirm(`确定永久删除回收站中的 ${trash.length} 个文件吗？此操作不可恢复。`)) return;
-    try { const result = await api<{ removed: number }>("/trash/empty", { method: "POST" }); setMessage(`已永久删除 ${result.removed} 个文件`); await loadTrash(); }
-    catch (error) { setMessage((error as Error).message); }
-  }
-  async function deleteTrashItem(id: number) {
-    if (!window.confirm("确定彻底删除这个文件吗？此操作不可恢复。")) return;
-    try { await api(`/trash/${id}`, { method: "DELETE" }); setMessage("已彻底删除"); await loadTrash(); }
-    catch (error) { setMessage((error as Error).message); }
-  }
+  useEffect(() => { load(); loadMeta(); loadDoubanSettings(); loadAutoSync(); }, []);
   useEffect(() => {
     if (!meta?.running) return;
     const timer = window.setInterval(loadMeta, 1500);
@@ -296,14 +278,6 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
           </div>
         </article>;
       })}</div>}
-    </section>
-
-    <section className="source-board">
-      <div className="section-heading"><h2>回收站</h2><span>{trash.length} 项</span></div>
-      {trash.length === 0 ? <div className="empty-card"><strong>回收站为空</strong><p>删除的媒体文件会先移到这里，可恢复或永久删除。</p></div> : <>
-        <div className="trash-actions"><button className="ghost danger" type="button" onClick={() => void emptyTrash()}>清空回收站</button></div>
-        <div className="work-files-list">{trash.map((item) => <div className="work-file-row" key={item.id}><div><strong>{item.kind === "show" && item.season ? `S${String(item.season).padStart(2, "0")}E${String(item.episode || 0).padStart(2, "0")}` : item.title}</strong><small>{item.path} · {item.source_name}</small></div><div className="trash-actions-inline"><button className="ghost" type="button" onClick={() => void restoreTrashItem(item.id)}>恢复</button><button className="ghost danger" type="button" onClick={() => void deleteTrashItem(item.id)}>彻底删除</button></div></div>)}</div>
-      </>}
     </section>
 
     <section className="source-board">

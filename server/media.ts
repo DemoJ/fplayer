@@ -128,7 +128,7 @@ export async function scanSource(sourceId: number, signal?: AbortSignal, progres
   const transaction = db.transaction((items: typeof prepared) => {
     for (const file of items) insert.run(file);
     const seen = new Set(items.map((f) => f.path));
-    const existing = db.prepare("SELECT path FROM media WHERE source_id=? AND available=1 AND trashed=0").all(sourceId) as Array<{ path: string }>;
+    const existing = db.prepare("SELECT path FROM media WHERE source_id=? AND available=1").all(sourceId) as Array<{ path: string }>;
     const missing = existing.filter((row) => !seen.has(row.path)).map((row) => row.path);
     if (missing.length) {
       const mark = db.prepare("UPDATE media SET available=0 WHERE source_id=? AND path=?");
@@ -294,4 +294,118 @@ export async function withCredentialProxy<T>(source: Source, mediaPath: string, 
   } finally {
     proxy.release();
   }
+}
+
+// Stored paths mix separators: local scans keep the OS separator (backslashes
+// on Windows), WebDAV scans store URL pathnames. Normalize to "/" for the
+// directory math below; on-disk operations go through path.join, which accepts
+// either separator.
+function toPosix(p: string) {
+  return p.replace(/\\+/g, "/").replace(/\/+/g, "/").replace(/\/$/, "");
+}
+
+// Deepest "/"-separated directory containing every given file path.
+// "" means the files sit directly in the source root.
+function commonParentDir(filePaths: string[]): string {
+  let segments = filePaths[0] ? filePaths[0].split("/").slice(0, -1) : [];
+  for (const filePath of filePaths.slice(1)) {
+    const parts = filePath.split("/").slice(0, -1);
+    let i = 0;
+    while (i < segments.length && i < parts.length && segments[i] === parts[i]) i++;
+    segments = segments.slice(0, i);
+  }
+  return segments.join("/");
+}
+
+function isInsideDir(dir: string, filePath: string) {
+  return dir === "" || filePath.startsWith(`${dir}/`);
+}
+
+export type WorkDeletion = { files: number; folders: string[] };
+
+// Deletes a work together with its files. The folder removed is the topmost
+// directory (walking up from the files' common parent) that contains no media
+// of any OTHER work — that boundary is the series folder, so its posters/nfos
+// go with it. When the folder is shared with another work (flat layouts), the
+// work's files are deleted one by one and the folder stays. DB rows are only
+// removed after every file deletion succeeded, so a failed run can be retried.
+export async function deleteWorkEntirely(workId: number): Promise<WorkDeletion> {
+  const work = db.prepare("SELECT * FROM works WHERE id=?").get(workId) as any;
+  if (!work) throw new Error("作品不存在");
+  const rows = db.prepare("SELECT m.*, s.type AS source_type, s.base_path, s.username, s.secret FROM media m JOIN sources s ON s.id=m.source_id WHERE m.work_id=?").all(workId) as any[];
+  const folders: string[] = [];
+  let files = 0;
+  const failures: string[] = [];
+  for (const sourceRow of new Map(rows.map((row) => [row.source_id, row])).values()) {
+    const source = { type: sourceRow.source_type, base_path: sourceRow.base_path, username: sourceRow.username, secret: sourceRow.secret } as Source;
+    const own = rows.filter((row) => row.source_id === sourceRow.source_id).map((row) => toPosix(row.path));
+    if (!own.length) continue;
+    const others = (db.prepare("SELECT path FROM media WHERE source_id=? AND work_id IS NOT ?").all(sourceRow.source_id, workId) as Array<{ path: string }>)
+      .map((row) => toPosix(row.path));
+    const deleteOne = async (relPath: string) => {
+      if (source.type === "local") {
+        await fs.unlink(path.join(source.base_path, relPath)).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      } else {
+        const response = await fetch(sourceFile(source, relPath), { method: "DELETE", headers: webdavHeaders(source) });
+        if (!response.ok && response.status !== 404) throw new Error(`WebDAV 删除失败 (${response.status})`);
+      }
+    };
+    let dir = commonParentDir(own);
+    // "" = the files sit in the source root itself; the root is never removed
+    // as a folder (it belongs to the source config), so delete files directly.
+    if (dir === "" || others.some((filePath) => isInsideDir(dir, filePath))) {
+      for (const relPath of own) {
+        try {
+          await deleteOne(relPath);
+          files++;
+        } catch (error) {
+          failures.push(`${relPath}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      continue;
+    }
+    // Walk up while the parent still contains only this work's media. The
+    // source root ("") is never removed itself — it belongs to the source
+    // config and may hold unrelated non-media files.
+    while (dir) {
+      const slash = dir.lastIndexOf("/");
+      const parent = slash === -1 ? "" : dir.slice(0, slash);
+      if (parent === "" || others.some((filePath) => isInsideDir(parent, filePath))) break;
+      dir = parent;
+    }
+    try {
+      if (source.type === "local") {
+        await fs.rm(path.join(source.base_path, dir), { recursive: true, force: true });
+      } else {
+        const response = await fetch(sourceFile(source, `${dir}/`), { method: "DELETE", headers: webdavHeaders(source) });
+        if (!response.ok && response.status !== 404) throw new Error(`WebDAV 删除失败 (${response.status})`);
+      }
+      folders.push(dir);
+      files += own.length;
+    } catch {
+      // Folder removal failed: fall back to per-file deletion so whatever can
+      // be removed still is.
+      for (const relPath of own) {
+        try {
+          await deleteOne(relPath);
+          files++;
+        } catch (error) {
+          failures.push(`${relPath}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+  }
+  if (failures.length) throw new Error(`部分文件删除失败，已保留记录，可重试：${failures.slice(0, 3).join("；")}`);
+  const removeWork = db.transaction(() => {
+    db.prepare("DELETE FROM progress WHERE media_id IN (SELECT id FROM media WHERE work_id=?)").run(workId);
+    db.prepare("DELETE FROM media WHERE work_id=?").run(workId);
+    db.prepare("DELETE FROM works WHERE id=?").run(workId);
+  });
+  removeWork();
+  for (const poster of [work.poster_path, work.backdrop_path]) {
+    if (poster) await fs.rm(path.join(config.dataDir, "posters", path.basename(String(poster))), { force: true }).catch(() => {});
+  }
+  return { files, folders };
 }

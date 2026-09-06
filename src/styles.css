@@ -17,8 +17,6 @@
 .admin-page .topbar { align-items: center; }
 .admin-toast { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: -20px 0 24px; padding: 12px 16px; border: 1px solid #3a342c; background: #1a1612; color: #e2c9b0; font-size: .82rem; }
 .admin-toast button { border: 0; background: none; color: #999; font-size: 1.1rem; cursor: pointer; }.admin-toast button:not(:last-child) { color: var(--orange); font-size: .82rem; }
-.trash-actions { display: flex; justify-content: flex-end; margin: 0 0 12px; }
-.trash-actions-inline { display: flex; gap: 8px; }
 .load-more-row { display: flex; justify-content: center; margin-top: 40px; }
 .admin-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 36px; }
 .stat-card { border: 1px solid #292c2e; background: linear-gradient(180deg, #15181b, #101315); padding: 18px 18px 16px; min-height: 96px; }
