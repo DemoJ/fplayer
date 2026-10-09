@@ -3,23 +3,37 @@ import { api, type ScanJob, type Source, type User } from "../api";
 
 const emptySourceForm = { name: "", type: "webdav", basePath: "", username: "", password: "" };
 
+function isDirty(current: unknown, snapshot: unknown) {
+  return JSON.stringify(current) !== JSON.stringify(snapshot);
+}
+
 export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: ScanJob[]; refreshJobs: (jobs: ScanJob[]) => void }) {
   const [sources, setSources] = useState<Source[]>([]);
   const [editingId, setEditingId] = useState<number>();
   const [showForm, setShowForm] = useState(false);
   const [message, setMessage] = useState("");
   const [form, setForm] = useState(emptySourceForm);
+  const [formSnapshot, setFormSnapshot] = useState(emptySourceForm);
+  const [formCloseBlocked, setFormCloseBlocked] = useState(false);
   const [meta, setMeta] = useState<{ running: boolean; pending: number; matchedWorks: number; hasCookie?: boolean; avoidRiskControl?: boolean; gapMs?: number; job?: { status: string; phase: string; total: number; processed: number; matched: number; skipped: number; failed: number; current_title?: string; error?: string } | null }>();
   const [doubanForm, setDoubanForm] = useState({ cookies: "", avoidRiskControl: true });
   const [loginInfo, setLoginInfo] = useState<{ isLogined?: boolean; name?: string }>({});
   const [showDouban, setShowDouban] = useState(false);
+  const [doubanSnapshot, setDoubanSnapshot] = useState({ cookies: "", avoidRiskControl: true });
+  const [doubanCloseBlocked, setDoubanCloseBlocked] = useState(false);
   const [autoSync, setAutoSync] = useState<{ enabled: boolean; intervalMinutes: number }>({ enabled: true, intervalMinutes: 15 });
   const [busyId, setBusyId] = useState<number>();
   const [showPassword, setShowPassword] = useState(false);
+  const [passwordCloseBlocked, setPasswordCloseBlocked] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const load = () => api<Source[]>("/sources").then(setSources);
   const loadMeta = () => api<typeof meta>("/metadata/status").then(setMeta).catch(() => {});
-  const loadDoubanSettings = () => api<{ cookies: string; avoidRiskControl: boolean }>("/metadata/settings").then((s) => setDoubanForm({ cookies: s.cookies || "", avoidRiskControl: s.avoidRiskControl !== false })).catch(() => {});
+  const loadDoubanSettings = () => api<{ cookies: string; avoidRiskControl: boolean }>("/metadata/settings").then((s) => {
+    const next = { cookies: s.cookies || "", avoidRiskControl: s.avoidRiskControl !== false };
+    setDoubanForm(next);
+    setDoubanSnapshot(next);
+    setDoubanCloseBlocked(false);
+  }).catch(() => {});
   const loadAutoSync = () => api<{ enabled: boolean; intervalMinutes: number }>("/settings/auto-sync").then(setAutoSync).catch(() => {});
   useEffect(() => { load(); loadMeta(); loadDoubanSettings(); loadAutoSync(); }, []);
   useEffect(() => {
@@ -31,12 +45,17 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
   function openCreate() {
     setEditingId(undefined);
     setForm(emptySourceForm);
+    setFormSnapshot(emptySourceForm);
+    setFormCloseBlocked(false);
     setShowForm(true);
     setMessage("");
   }
   function openEdit(source: Source) {
+    const next = { name: source.name, type: source.type, basePath: source.base_path, username: source.username || "", password: "" };
     setEditingId(source.id);
-    setForm({ name: source.name, type: source.type, basePath: source.base_path, username: source.username || "", password: "" });
+    setForm(next);
+    setFormSnapshot(next);
+    setFormCloseBlocked(false);
     setShowForm(true);
     setMessage("");
   }
@@ -44,6 +63,11 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
     setShowForm(false);
     setEditingId(undefined);
     setForm(emptySourceForm);
+    setFormCloseBlocked(false);
+  }
+  function handleFormMaskClick() {
+    if (isDirty(form, formSnapshot)) { setFormCloseBlocked(true); return; }
+    closeForm();
   }
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -92,7 +116,16 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
   }
   function openPassword() {
     setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    setPasswordCloseBlocked(false);
     setShowPassword(true);
+  }
+  function closePassword() {
+    setPasswordCloseBlocked(false);
+    setShowPassword(false);
+  }
+  function handlePasswordMaskClick() {
+    if (passwordForm.currentPassword || passwordForm.newPassword || passwordForm.confirmPassword) { setPasswordCloseBlocked(true); return; }
+    closePassword();
   }
   async function submitPassword(event: React.FormEvent) {
     event.preventDefault();
@@ -100,7 +133,7 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
     try {
       await api("/me/password", { method: "POST", body: JSON.stringify({ currentPassword: passwordForm.currentPassword, newPassword: passwordForm.newPassword }) });
       setMessage("密码已修改，其他设备的登录已失效");
-      setShowPassword(false);
+      closePassword();
     } catch (error) {
       setMessage((error as Error).message);
     }
@@ -151,6 +184,19 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
       setMessage((error as Error).message);
     }
   }
+  function openDouban() {
+    setDoubanCloseBlocked(false);
+    setShowDouban(true);
+    loadDoubanSettings();
+  }
+  function closeDouban() {
+    setDoubanCloseBlocked(false);
+    setShowDouban(false);
+  }
+  function handleDoubanMaskClick() {
+    if (isDirty(doubanForm, doubanSnapshot)) { setDoubanCloseBlocked(true); return; }
+    closeDouban();
+  }
 
   const metaJob = meta?.job;
   const metaRunning = Boolean(meta?.running);
@@ -187,7 +233,7 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
             <p>{metaRunning ? (metaJob?.current_title ? `正在匹配：${metaJob.current_title}` : "匹配进行中") : "后台异步 · 已匹配自动跳过"}</p>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <button className="ghost" type="button" onClick={() => { setShowDouban(true); loadDoubanSettings(); }}>Cookie</button>
+            <button className="ghost" type="button" onClick={openDouban}>Cookie</button>
             {metaRunning
               ? <button className="ghost danger" onClick={stopMetadata}>停止</button>
               : <button className="ghost accent" onClick={refreshMetadata}>开始匹配</button>}
@@ -200,14 +246,14 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
       </article>
     </section>
 
-    {showDouban && <div className="drawer-mask" onClick={() => setShowDouban(false)}>
-      <form className="drawer" onClick={(e) => e.stopPropagation()} onSubmit={(e) => { e.preventDefault(); void saveDouban().then(() => setShowDouban(false)); }}>
+    {showDouban && <div className="drawer-mask" onClick={handleDoubanMaskClick}>
+      <form className="drawer" onClick={(e) => e.stopPropagation()} onSubmit={(e) => { e.preventDefault(); void saveDouban().then(closeDouban); }}>
         <div className="drawer-head">
           <div>
             <span className="eyebrow">DOUBAN</span>
             <h2>设置豆瓣 Cookie</h2>
           </div>
-          <button type="button" className="icon-close" aria-label="关闭" onClick={() => setShowDouban(false)}>×</button>
+          <button type="button" className="icon-close" aria-label="关闭" onClick={closeDouban}>×</button>
         </div>
         <p className="drawer-desc">浏览器登录 movie.douban.com 后，复制 Cookie 粘贴到这里并保存。保存后可点「检测登录」验证。</p>
         <label>豆瓣 Cookie<textarea rows={6} value={doubanForm.cookies} onChange={(e) => setDoubanForm({ ...doubanForm, cookies: e.target.value })} placeholder='bid=xxx; dbcl2="xxx"; ck=xxx; ...' required /></label>
@@ -215,9 +261,10 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
           <input type="checkbox" checked={doubanForm.avoidRiskControl} onChange={(e) => setDoubanForm({ ...doubanForm, avoidRiskControl: e.target.checked })} />
           <span>开启防封禁（未登录约 5s/次，登录约 3s/次）</span>
         </label>
+        {doubanCloseBlocked && <p className="drawer-notice">已输入的内容尚未保存，点击外部不会关闭；请用「取消」或右上角 × 关闭。</p>}
         <div className="drawer-actions">
           <button type="button" className="ghost" onClick={checkLogin}>检测登录</button>
-          <button type="button" className="secondary" onClick={() => setShowDouban(false)}>取消</button>
+          <button type="button" className="secondary" onClick={closeDouban}>取消</button>
           <button className="primary" type="submit">保存 Cookie</button>
         </div>
         {loginInfo.isLogined !== undefined && <small style={{ color: "#7d7a73" }}>{loginInfo.isLogined ? `当前登录：${loginInfo.name || "已登录"}` : "当前未登录或 Cookie 无效"}</small>}
@@ -291,27 +338,28 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
       </div>
     </section>
 
-    {showPassword && <div className="drawer-mask" onClick={() => setShowPassword(false)}>
+    {showPassword && <div className="drawer-mask" onClick={handlePasswordMaskClick}>
       <form className="drawer" onClick={(e) => e.stopPropagation()} onSubmit={submitPassword}>
         <div className="drawer-head">
           <div>
             <span className="eyebrow">ACCOUNT</span>
             <h2>修改密码</h2>
           </div>
-          <button type="button" className="icon-close" aria-label="关闭" onClick={() => setShowPassword(false)}>×</button>
+          <button type="button" className="icon-close" aria-label="关闭" onClick={closePassword}>×</button>
         </div>
         <p className="drawer-desc">输入当前密码验证身份，新密码至少 8 位。保存后当前设备保持登录，其他设备需重新登录。</p>
         <label>当前密码<input type="password" value={passwordForm.currentPassword} onChange={(e) => setPasswordForm({ ...passwordForm, currentPassword: e.target.value })} required /></label>
         <label>新密码<input type="password" value={passwordForm.newPassword} onChange={(e) => setPasswordForm({ ...passwordForm, newPassword: e.target.value })} minLength={8} required /></label>
         <label>确认新密码<input type="password" value={passwordForm.confirmPassword} onChange={(e) => setPasswordForm({ ...passwordForm, confirmPassword: e.target.value })} minLength={8} required /></label>
+        {passwordCloseBlocked && <p className="drawer-notice">已输入的内容尚未保存，点击外部不会关闭；请用「取消」或右上角 × 关闭。</p>}
         <div className="drawer-actions">
-          <button type="button" className="secondary" onClick={() => setShowPassword(false)}>取消</button>
+          <button type="button" className="secondary" onClick={closePassword}>取消</button>
           <button className="primary" type="submit">保存新密码</button>
         </div>
       </form>
     </div>}
 
-    {showForm && <div className="drawer-mask" onClick={closeForm}>
+    {showForm && <div className="drawer-mask" onClick={handleFormMaskClick}>
       <form className="drawer" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <div className="drawer-head">
           <div>
@@ -328,6 +376,7 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
           <label>用户名<input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></label>
           <label>密码 / Token<input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder={editingId ? "留空则不修改" : ""} /></label>
         </>}
+        {formCloseBlocked && <p className="drawer-notice">已输入的内容尚未保存，点击外部不会关闭；请用「取消」或右上角 × 关闭。</p>}
         <div className="drawer-actions">
           <button type="button" className="secondary" onClick={closeForm}>取消</button>
           <button className="primary" type="submit">{editingId ? "保存修改" : "添加"}</button>

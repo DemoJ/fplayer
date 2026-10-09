@@ -108,6 +108,7 @@
 }
 .drawer label.checkbox-row span { line-height: 1.4; }
 .drawer-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.drawer-notice { margin: 18px 0 0; padding: 10px 12px; border: 1px solid #3a342c; background: #1a1612; color: #e2c9b0; font-size: .78rem; line-height: 1.5; }
 .icon-close { border: 0; background: #1b1f22; color: #aaa; width: 34px; height: 34px; font-size: 1.2rem; cursor: pointer; }
 .icon-close:hover { color: #fff; }
 .secondary { border: 1px solid #3a3d40; background: transparent; color: #aaa; padding: 13px 20px; cursor: pointer; }
