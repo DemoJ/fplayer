@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { config } from "./config.js";
+import { migrateSessions } from "./sessions.js";
 
 fs.mkdirSync(config.dataDir, { recursive: true });
 export const db = new Database(path.join(config.dataDir, "fplayer.db"));
@@ -16,11 +17,6 @@ db.exec(`
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'admin',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS sessions (
-    token_hash TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    expires_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,6 +112,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_works_kind ON works(kind, title);
   CREATE INDEX IF NOT EXISTS idx_scan_jobs_source ON scan_jobs(source_id, id DESC);
 `);
+
+migrateSessions(db, config.sessions);
 
 // Note: the "mark interrupted jobs as failed on restart" cleanup used to live
 // here but ran on every module import, which made `npm test` write to the real

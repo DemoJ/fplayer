@@ -77,13 +77,8 @@ export function decrypt(value: string | null) {
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
 }
 
-export function newSessionToken() {
-  return randomBytes(32).toString("base64url");
-}
-
-export function hashToken(token: string) {
-  return createHash("sha256").update(token).digest("hex");
-}
+// Keep existing imports compatible; token helpers themselves have no DB side effects.
+export { newSessionToken, hashToken } from "./sessions.js";
 
 // Short-lived HMAC-signed token for HLS segment URLs so the main session token
 // is never placed in the playlist/segment URL or access logs.

@@ -7,34 +7,54 @@ export type ScanJob = { id: number; source_id: number; source_name?: string; sta
 export type BrowseFolder = { name: string; path: string; file_count: number };
 export type BrowseResult = { level: "sources" | "folder"; path: string; crumbs: Array<{ name: string; path: string }>; source?: Source; sources: Source[]; folders: BrowseFolder[]; files: Media[] };
 
-const tokenKey = "fplayer-token";
+export const tokenKey = "fplayer-token";
 export const getToken = () => localStorage.getItem(tokenKey);
 export const setToken = (token: string) => localStorage.setItem(tokenKey, token);
 export const clearToken = () => localStorage.removeItem(tokenKey);
+
+export class ApiError extends Error {
+  constructor(message: string, public status?: number, public code?: string) { super(message); }
+}
 
 let onUnauthorized: (() => void) | null = null;
 export function setOnUnauthorized(handler: (() => void) | null) { onUnauthorized = handler; }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response;
-  const headers: Record<string, string> = { ...(options.headers as Record<string, string> | undefined) };
-  if (options.body) headers["Content-Type"] = "application/json";
+  const headers = new Headers(options.headers);
+  if (options.body) headers.set("Content-Type", "application/json");
   const token = getToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   try {
     response = await fetch(`/api${path}`, { ...options, headers });
   } catch {
-    throw new Error("网络连接失败，请检查服务是否运行");
+    options.signal?.throwIfAborted();
+    throw new ApiError("网络连接失败，请检查服务是否运行");
   }
-  if (response.status === 401) {
-    clearToken();
-    onUnauthorized?.();
-    throw new Error("登录已过期，请重新登录");
-  }
+  options.signal?.throwIfAborted();
   if (response.status === 204) return undefined as T;
-  const text = await response.text();
-  const body = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error((body as { error?: string }).error || `请求失败 (${response.status})`);
+  let body: any;
+  try {
+    const text = await response.text();
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    options.signal?.throwIfAborted();
+    if (response.ok) throw new ApiError("服务响应异常，请稍后重试", response.status);
+  }
+  options.signal?.throwIfAborted();
+  const route = path.split("?")[0];
+  const code = typeof body?.code === "string" ? body.code : undefined;
+  const sessionInvalid = response.status === 401 && route !== "/login" && route !== "/setup"
+    && (route === "/me" || code === "SESSION_REQUIRED" || code === "SESSION_INVALID");
+  if (sessionInvalid) {
+    // A late response from an old session must not sign out a newer login.
+    if (token && getToken() === token) {
+      clearToken();
+      onUnauthorized?.();
+    }
+    throw new ApiError("登录已过期，请重新登录", 401, code || "SESSION_INVALID");
+  }
+  if (!response.ok) throw new ApiError(typeof body?.error === "string" ? body.error : `请求失败 (${response.status})`, response.status, code);
   return body as T;
 }
 

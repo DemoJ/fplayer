@@ -1,5 +1,6 @@
 package com.fplayer.tv.data
 
+import com.fplayer.tv.core.Session
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
@@ -7,6 +8,7 @@ import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Path
 import retrofit2.http.Query
+import retrofit2.http.Tag
 
 interface ApiService {
 
@@ -20,10 +22,10 @@ interface ApiService {
     suspend fun login(@Body body: LoginBody): LoginResponse
 
     @POST("api/logout")
-    suspend fun logout(): OkResponse
+    suspend fun logout(@Tag session: Session): OkResponse
 
     @GET("api/me")
-    suspend fun me(): MeResponse
+    suspend fun me(@Tag session: Session): MeResponse
 
     @GET("api/continue")
     suspend fun continueWatching(@Query("limit") limit: Int = 12): List<Media>

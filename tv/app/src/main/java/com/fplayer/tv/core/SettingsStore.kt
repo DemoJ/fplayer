@@ -8,19 +8,13 @@ import kotlinx.coroutines.flow.first
 
 private val Context.settingsDataStore by preferencesDataStore(name = "fplayer_settings")
 
-data class Session(
-    val baseUrl: String,
-    val token: String,
-    val username: String,
-)
-
-class SettingsStore(private val context: Context) {
+class SettingsStore(private val context: Context) : SessionStore {
 
     private val keyBaseUrl = stringPreferencesKey("base_url")
     private val keyToken = stringPreferencesKey("token")
     private val keyUsername = stringPreferencesKey("username")
 
-    suspend fun loadSession(): Session? {
+    override suspend fun loadSession(): Session? {
         val prefs = context.settingsDataStore.data.first()
         val baseUrl = prefs[keyBaseUrl]
         val token = prefs[keyToken]
@@ -32,7 +26,7 @@ class SettingsStore(private val context: Context) {
         }
     }
 
-    suspend fun saveSession(session: Session) {
+    override suspend fun saveSession(session: Session) {
         context.settingsDataStore.edit { prefs ->
             prefs[keyBaseUrl] = session.baseUrl
             prefs[keyToken] = session.token
@@ -40,7 +34,7 @@ class SettingsStore(private val context: Context) {
         }
     }
 
-    suspend fun clearSession() {
+    override suspend fun clearSession() {
         context.settingsDataStore.edit { prefs ->
             prefs.remove(keyBaseUrl)
             prefs.remove(keyToken)

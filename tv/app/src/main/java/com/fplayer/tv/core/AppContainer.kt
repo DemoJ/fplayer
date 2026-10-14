@@ -10,6 +10,14 @@ import com.fplayer.tv.data.ApiClient
 object AppContainer {
     lateinit var store: SettingsStore
     val apiClient = ApiClient()
+    val sessions: SessionController by lazy {
+        SessionController(
+            store = store,
+            verifySession = { apiClient.api.me(it) },
+            logoutSession = { apiClient.api.logout(it) },
+            updateSession = apiClient::updateSession,
+        )
+    }
 
     fun init(context: Context) {
         if (!::store.isInitialized) {

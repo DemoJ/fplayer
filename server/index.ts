@@ -6,7 +6,8 @@ import { spawn } from "node:child_process";
 import express from "express";
 import { db } from "./db.js";
 import { config } from "./config.js";
-import { encrypt, hashPassword, hashToken, newSessionToken, signTranscode, verifyPassword, verifyTranscodeSig } from "./security.js";
+import { encrypt, hashPassword, signTranscode, verifyPassword, verifyTranscodeSig } from "./security.js";
+import { SessionStore } from "./sessions.js";
 import { mediaInputUrl, probe, sourceFile, acquireCredentialProxy, webdavHeaders, withCredentialProxy, deleteWorkEntirely, type CredentialProxy } from "./media.js";
 import { activeCount, destroy, get, maxConcurrent, owns, register, activeSessionFor, producedSeq, withLock } from "./transcodes.js";
 import { absSeq, blockHead, buildPlaylist, contiguousFrom, ensureCacheDir, fileExists, listSegments, readMeta, segSecFor, segmentFile, sweepCache, sweepStaleDirectories, touch, writeMeta, REMUX_SEGMENT_SECONDS, TRANSCODE_SEGMENT_SECONDS } from "./transcode-cache.js";
@@ -29,18 +30,20 @@ app.use((_req, res, next) => {
   next();
 });
 const publicUser = (user: any) => ({ id: user.id, username: user.username, role: user.role });
-// Only the media stream endpoint may be reached with the token in the query
-// string (a <video> element cannot set an Authorization header). Every other
-// API refuses query tokens so a leaked URL token can only pull media files,
-// never manage sources, metadata or settings.
+// Only the media stream endpoint accepts a query token (<video> cannot set
+// Authorization). This limits URL-token transport, NOT the token's authority:
+// a leaked session token can still be replayed as a Bearer token on other APIs.
 const QUERY_TOKEN_PATHS = [/^\/api\/media\/\d+\/file$/];
+const sessions = new SessionStore(db, config.sessions);
 function auth(req: AuthRequest, res: express.Response, next: express.NextFunction) {
   const header = req.headers.authorization?.replace("Bearer ", "");
   const query = typeof req.query.token === "string" ? req.query.token : undefined;
   const token = header || (query && QUERY_TOKEN_PATHS.some((re) => re.test(req.path)) ? query : undefined);
-  if (!token) return res.status(401).json({ error: "请先登录" });
-  const session = db.prepare("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>CURRENT_TIMESTAMP").get(hashToken(token)) as any;
-  if (!session) return res.status(401).json({ error: "登录已过期" }); req.user = publicUser(session); next();
+  if (!token) return res.status(401).json({ error: "请先登录", code: "SESSION_REQUIRED" });
+  const session = sessions.authenticate(token);
+  if (!session) return res.status(401).json({ error: "登录已过期", code: "SESSION_INVALID" });
+  req.user = session;
+  next();
 }
 const admin = (req: AuthRequest, res: express.Response, next: express.NextFunction) => req.user?.role === "admin" ? next() : res.status(403).json({ error: "需要管理员权限" });
 // Setup window: the admin account may only be created shortly after server
@@ -98,17 +101,16 @@ app.post("/api/login", (req, res) => {
   const user = db.prepare("SELECT * FROM users WHERE username=?").get(username) as any;
   if (!user || !verifyPassword(req.body?.password || "", user.password_hash)) {
     recordLoginFailure(key);
-    return res.status(401).json({ error: "用户名或密码错误" });
+    return res.status(401).json({ error: "用户名或密码错误", code: "INVALID_CREDENTIALS" });
   }
   loginFailures.delete(key);
-  const token = newSessionToken();
-  db.prepare("INSERT INTO sessions VALUES(?,?,datetime('now','+30 days'))").run(hashToken(token), user.id);
+  const token = sessions.create(user.id);
   res.json({ token, user: publicUser(user) });
 });
 app.post("/api/logout", auth, (req: AuthRequest, res) => {
   // Revoke the session server-side so a leaked token can't be reused.
   const token = req.headers.authorization?.replace("Bearer ", "") || (typeof req.query.token === "string" ? req.query.token : "");
-  if (token) db.prepare("DELETE FROM sessions WHERE token_hash=?").run(hashToken(token));
+  if (token) sessions.revoke(token);
   res.json({ ok: true });
 });
 app.get("/api/me", auth, (req: AuthRequest, res) => res.json({ user: req.user }));
@@ -122,7 +124,7 @@ app.post("/api/me/password", auth, (req: AuthRequest, res) => {
   db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hashPassword(newPassword), user.id);
   // Revoke the user's other sessions so a leaked one can't survive a password change.
   const token = req.headers.authorization?.replace("Bearer ", "") || "";
-  if (token) db.prepare("DELETE FROM sessions WHERE user_id=? AND token_hash<>?").run(user.id, hashToken(token));
+  if (token) sessions.revokeOthers(user.id, token);
   res.json({ ok: true });
 });
 app.get("/api/sources", auth, (_req, res) => res.json(db.prepare("SELECT id,name,type,base_path,username,enabled,last_scan_at,last_error FROM sources ORDER BY id DESC").all()));

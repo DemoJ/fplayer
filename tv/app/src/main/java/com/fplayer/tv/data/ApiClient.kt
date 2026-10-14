@@ -60,19 +60,22 @@ class ApiClient {
 
     private inner class AuthHeaderInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
-            val token = session?.token
-            if (token.isNullOrEmpty()) return chain.proceed(chain.request())
-            val request = chain.request().newBuilder()
-                .header("Authorization", "Bearer $token")
-                .build()
-            return chain.proceed(request)
+            // /me 和 logout 携带发起时的会话；其他请求在此统一拍快照。
+            // URL 重写复用同一快照，避免切换会话时 token 与服务器地址混用。
+            val snapshot = chain.request().tag(Session::class.java) ?: session
+            val request = chain.request().newBuilder().tag(Session::class.java, snapshot)
+            val token = snapshot?.token
+            if (!token.isNullOrEmpty()) {
+                request.header("Authorization", "Bearer $token")
+            }
+            return chain.proceed(request.build())
         }
     }
 
     private inner class UrlRewriteInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
-            val baseUrl = session?.baseUrl
             val request = chain.request()
+            val baseUrl = request.tag(Session::class.java)?.baseUrl
             if (baseUrl.isNullOrEmpty()) return chain.proceed(request)
             var rewrittenUrl: String? = null
             val original = request.url

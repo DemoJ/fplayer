@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, Route, Routes, useLocation } from "react-router-dom";
-import { api, clearToken, getToken, setOnUnauthorized, setToken, type ScanJob, type User } from "./api";
+import { api, clearToken, getToken, setOnUnauthorized, setToken, tokenKey, type ScanJob, type User } from "./api";
+import { loadStartup } from "./startup";
 import { Home } from "./pages/Home";
 import { Library } from "./pages/Library";
 import { BrowseView } from "./pages/Browse";
@@ -63,16 +64,45 @@ export default function App() {
   const [initialized, setInitialized] = useState<boolean>();
   const [setupExpired, setSetupExpired] = useState(false);
   const [user, setUser] = useState<User>();
+  const [startupError, setStartupError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const startupRequest = useRef<AbortController | null>(null);
   useEffect(() => {
-    setOnUnauthorized(() => setUser(undefined));
-    // Wait for both /setup and /me (if a token exists) before rendering, so a
-    // logged-in user never flashes the Auth page during startup.
-    const setupP = api<{ initialized: boolean; setupExpired?: boolean }>("/setup").then((r) => { setSetupExpired(Boolean(r.setupExpired)); return r.initialized; }).catch(() => false);
-    const meP = getToken() ? api<{ user: User }>("/me").then((r) => r.user).catch(() => { clearToken(); return undefined; }) : Promise.resolve(undefined);
-    Promise.all([setupP, meP]).then(([init, u]) => { setInitialized(init); setUser(u); });
-    return () => setOnUnauthorized(null);
+    setOnUnauthorized(() => { setUser(undefined); setStartupError(""); });
+    const syncSession = (event: StorageEvent) => {
+      if (event.key !== tokenKey && event.key !== null) return;
+      startupRequest.current?.abort();
+      setUser(undefined); setInitialized(undefined); setStartupError("");
+      setAttempt((current) => current + 1);
+    };
+    window.addEventListener("storage", syncSession);
+    return () => { setOnUnauthorized(null); window.removeEventListener("storage", syncSession); };
   }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    startupRequest.current = controller;
+    const token = getToken();
+    setStartupError("");
+    const timeout = window.setTimeout(() => controller.abort(), 15_000);
+    loadStartup(controller.signal).then((state) => {
+      if (startupRequest.current !== controller) return;
+      if (getToken() !== token && !(token && !getToken() && !state.user)) { setAttempt((current) => current + 1); return; }
+      setInitialized(state.initialized); setSetupExpired(state.setupExpired); setUser(state.user);
+    }).catch((error) => {
+      if (startupRequest.current !== controller) return;
+      if (getToken() !== token) { setAttempt((current) => current + 1); return; }
+      setStartupError(controller.signal.aborted ? "连接超时，请检查网络或服务状态后重试" : (error as Error).message);
+    }).finally(() => window.clearTimeout(timeout));
+    return () => { startupRequest.current = null; controller.abort(); window.clearTimeout(timeout); };
+  }, [attempt]);
+  useEffect(() => {
+    if (!startupError) return;
+    const retry = () => setAttempt((current) => current + 1);
+    window.addEventListener("online", retry);
+    return () => window.removeEventListener("online", retry);
+  }, [startupError]);
+  if (startupError) return <main className="auth-page"><section className="auth-copy"><span className="eyebrow">YOUR SCREEN. YOUR STORAGE.</span><h1>稍等，<br />正在重连。</h1><p>暂时无法连接你的私人放映室，请检查网络或服务器状态。</p></section><section className="auth-card"><div className="brand-mark">F</div><h2>连接未完成</h2><p className="error" role="alert">{startupError}</p><p>{getToken() ? "登录凭证已保留，连接恢复后无需重新输入密码。" : "暂时无法确认服务状态，请重试后继续。"}</p><button className="primary" onClick={() => setAttempt((current) => current + 1)}>重新连接</button></section></main>;
   if (initialized === undefined) return <div className="splash">F</div>;
-  if (!user) return <Auth initialized={initialized} setupExpired={setupExpired} onLogin={setUser} onSetupDone={() => setInitialized(true)} />;
-  return <Layout user={user} logout={() => { void api("/logout", { method: "POST" }).catch(() => {}); clearToken(); setUser(undefined); }} />;
+  if (!user) return <Auth initialized={initialized} setupExpired={setupExpired} onLogin={(next) => { startupRequest.current?.abort(); startupRequest.current = null; setUser(next); }} onSetupDone={() => setInitialized(true)} />;
+  return <Layout user={user} logout={() => { startupRequest.current?.abort(); startupRequest.current = null; void api("/logout", { method: "POST" }).catch(() => {}); clearToken(); setUser(undefined); }} />;
 }

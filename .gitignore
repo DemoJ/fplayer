@@ -8,6 +8,7 @@ dist-server/
 *.log
 test-media/
 ffmpeg-static/
+.video_agent/
 
 # TV (Android / Gradle / Kotlin)
 tv/.gradle/

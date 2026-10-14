@@ -1,6 +1,8 @@
 import path from "node:path";
+import { readSessionPolicy } from "./sessions.js";
 
 export const config = {
+  sessions: readSessionPolicy(process.env),
   port: Number(process.env.PORT || 3000),
   dataDir: path.resolve(process.env.DATA_DIR || "data"),
   appSecret: process.env.APP_SECRET || "",
