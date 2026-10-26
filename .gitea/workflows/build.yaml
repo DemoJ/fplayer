@@ -20,5 +20,5 @@ jobs:
           context: .
           push: true
           tags: |
-            registry.diyun.work/fplayer:v${{ github.run_number }}
-            registry.diyun.work/fplayer:latest
+            registry.diyun.site/fplayer:v${{ github.run_number }}
+            registry.diyun.site/fplayer:latest
