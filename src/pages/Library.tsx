@@ -56,7 +56,7 @@ export function Library({ kind }: { kind: "movie" | "show" }) {
       <div><span className="eyebrow">PRIVATE CINEMA</span><h1>{kind === "movie" ? "电影" : "剧集"}</h1></div>
       <label className="search">⌕<input placeholder="搜索片名" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
     </header>
-    {message && <div className="admin-toast">{message}<button type="button" aria-label="关闭" onClick={() => setMessage("")}>×</button></div>}
+    {message && <div className="admin-toast" role="status">{message}<button type="button" aria-label="关闭" onClick={() => setMessage("")}>×</button></div>}
     <WorkSection title={`全部${kind === "movie" ? "电影" : "剧集"}`} items={items} loading={loading} refreshingId={refreshingId} onRefresh={refreshItem} total={total} loadingMore={loadingMore} onLoadMore={() => void loadMore()} onDeleted={handleDeleted} />
   </main>;
 }

@@ -15,8 +15,41 @@
 .primary.play.disabled { opacity: .4; pointer-events: none; }
 .icon-close, .player-tap { font-family: inherit; }
 .admin-page .topbar { align-items: center; }
-.admin-toast { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: -20px 0 24px; padding: 12px 16px; border: 1px solid #3a342c; background: #1a1612; color: #e2c9b0; font-size: .82rem; }
-.admin-toast button { border: 0; background: none; color: #999; font-size: 1.1rem; cursor: pointer; }.admin-toast button:not(:last-child) { color: var(--orange); font-size: .82rem; }
+.admin-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: min(420px, calc(100vw - 48px));
+  padding: 13px 13px 13px 18px;
+  border: 1px solid #33383b;
+  border-left: 3px solid var(--orange);
+  background: linear-gradient(180deg, #1b1f22f5, #14171af7);
+  color: #e6e0d6;
+  font-size: .82rem;
+  line-height: 1.5;
+  box-shadow: 0 20px 55px #000c, 0 2px 10px #0007;
+  backdrop-filter: blur(14px);
+  animation: admin-toast-in .28s cubic-bezier(.2, .8, .2, 1);
+}
+@keyframes admin-toast-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.admin-toast button { flex: none; display: inline-grid; place-items: center; border: 0; background: transparent; color: #7f8386; font-size: 1.05rem; line-height: 1; cursor: pointer; transition: background .18s, border-color .18s, color .18s; }
+.admin-toast button:not(:last-child) { padding: 7px 14px; border: 1px solid #ef6a3a3d; border-radius: 999px; background: #ef6a3a17; color: #ff9a72; font-size: .76rem; font-weight: 700; letter-spacing: .04em; }
+.admin-toast button:not(:last-child):hover { border-color: #ef6a3a66; background: #ef6a3a2b; color: #ffb08f; }
+.admin-toast button:last-child { width: 26px; height: 26px; border-radius: 50%; }
+.admin-toast button:last-child:hover { background: #ffffff12; color: #fff; }
+@media (max-width: 800px) {
+  .admin-toast { left: 16px; right: 16px; bottom: calc(74px + env(safe-area-inset-bottom)); max-width: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-toast { animation: none; }
+}
 .load-more-row { display: flex; justify-content: center; margin-top: 40px; }
 .admin-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 36px; }
 .stat-card { border: 1px solid #292c2e; background: linear-gradient(180deg, #15181b, #101315); padding: 18px 18px 16px; min-height: 96px; }

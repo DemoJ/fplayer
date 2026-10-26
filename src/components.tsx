@@ -131,7 +131,7 @@ export function MediaSection({ title, items, loading, wide = false, emptyText }:
       // unwatching resets its progress so it no longer shows as partially seen.
       setRemoved((current) => new Set(current).add(item.id));
       setMenuId(undefined);
-      showUndo(completed ? "已取消完成标记" : "已标记为完成", () => {
+      showUndo(completed ? "已取消看完标记" : "已标记为看完", () => {
         void api(`/media/${item.id}/progress`, { method: "PUT", body: JSON.stringify({ position: completed ? duration : 0, duration, completed }) }).catch(() => {});
         setRemoved((current) => { const next = new Set(current); next.delete(item.id); return next; });
       });
@@ -142,7 +142,7 @@ export function MediaSection({ title, items, loading, wide = false, emptyText }:
   }
   return <section className="media-section">
     <div className="section-heading"><h2>{title}</h2><span>{visible.length} 部</span></div>
-    {undo && <div className="admin-toast">{undo.message}<button type="button" onClick={undo.onUndo}>撤销</button><button type="button" aria-label="关闭" onClick={() => setUndo(undefined)}>×</button></div>}
+    {undo && <div className="admin-toast" role="status">{undo.message}<button type="button" onClick={undo.onUndo}>撤销</button><button type="button" aria-label="关闭" onClick={() => setUndo(undefined)}>×</button></div>}
     {loading ? <div className="empty">正在翻阅片库...</div> : visible.length === 0 ? (emptyText ? <div className="empty muted">{emptyText}</div> : null) : <div className={wide ? "continue-grid" : "poster-grid"}>{visible.map((item, index) => {
       const percent = item.position && item.progress_duration ? Math.min(100, (item.position / item.progress_duration) * 100) : 0;
       const poster = item.work_poster;

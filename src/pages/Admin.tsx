@@ -211,7 +211,7 @@ export function SourceAdmin({ user, jobs, refreshJobs }: { user: User; jobs: Sca
       <button className="primary" onClick={openCreate}>＋ 添加媒体源</button>
     </header>
 
-    {message && <div className="admin-toast">{message}<button type="button" aria-label="关闭" onClick={() => setMessage("")}>×</button></div>}
+    {message && <div className="admin-toast" role="status">{message}<button type="button" aria-label="关闭" onClick={() => setMessage("")}>×</button></div>}
 
     <section className="admin-stats">
       <article className="stat-card">
