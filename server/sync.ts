@@ -1,6 +1,7 @@
 import { db } from "./db.js";
 import { startScan } from "./scans.js";
 import { log } from "./log.js";
+import { getSetting, setSetting } from "./settings.js";
 
 const DEFAULT_INTERVAL_MINUTES = 15;
 
@@ -10,10 +11,10 @@ type SyncSettings = {
 };
 
 function readSettings(): SyncSettings {
-  const row = db.prepare("SELECT value FROM app_settings WHERE key='auto_sync'").get() as { value: string } | undefined;
-  if (!row) return { enabled: true, intervalMinutes: DEFAULT_INTERVAL_MINUTES };
+  const raw = getSetting("auto_sync");
+  if (!raw) return { enabled: true, intervalMinutes: DEFAULT_INTERVAL_MINUTES };
   try {
-    const parsed = JSON.parse(row.value) as Partial<SyncSettings>;
+    const parsed = JSON.parse(raw) as Partial<SyncSettings>;
     return {
       enabled: parsed.enabled !== false,
       intervalMinutes: Math.max(1, Number(parsed.intervalMinutes) || DEFAULT_INTERVAL_MINUTES),
@@ -28,7 +29,7 @@ export function getAutoSyncSettings(): SyncSettings {
 }
 
 export function saveAutoSyncSettings(settings: SyncSettings) {
-  db.prepare("INSERT INTO app_settings(key,value) VALUES('auto_sync',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP").run(JSON.stringify(settings));
+  setSetting("auto_sync", JSON.stringify(settings));
 }
 
 let timer: ReturnType<typeof setInterval> | undefined;
