@@ -129,6 +129,33 @@ type SubjectSearchData = {
   }>;
 };
 
+// Unlike classic search, subject_search joins translated/original names and
+// the release year into one title: "小丑 Joker (2019)".
+function subjectSearchTitle(rawTitle: string, explicitYear: number) {
+  let title = rawTitle.trim();
+  let year = explicitYear;
+  const dated = title.match(/^(.+?)\s*[（(]\s*([12]\d{3})\s*[）)]\s*$/u);
+  if (dated) {
+    title = dated[1].trim();
+    year ||= Number(dated[2]);
+  } else {
+    // A bare number may be part of the name (1917, Blade Runner 2049).
+    // Remove it only when a separate release-year field corroborates it,
+    // and never strip a wholly numeric title or a year inside a longer number.
+    const bare = title.match(/^(.+?\D)\s*((?:19|20)\d{2})$/u);
+    if (bare && Number(bare[2]) === explicitYear) title = bare[1].trim();
+  }
+  // Split only the unambiguous Han-title + whitespace + Latin-title form.
+  // Keep punctuation, edition/season markers and numeric title parts intact;
+  // an internally mixed name such as "阿Q正传" must not become two aliases.
+  const bilingual = title.match(/^([^A-Za-z]*\p{Script=Han}[^A-Za-z]*)\s+([A-Za-z][^\p{Script=Han}]*)$/u);
+  return {
+    name: bilingual?.[1].trim() || title,
+    originalName: bilingual?.[2].trim() || title,
+    year,
+  };
+}
+
 // search.douban.com subject_search embeds its results as window.__DATA__.
 function parseSubjectSearchData(html: string): DoubanSearchItem[] {
   const dataMatch = html.match(/window\.__DATA__\s*=\s*(\{[\s\S]*?\});/);
@@ -145,9 +172,7 @@ function parseSubjectSearchData(html: string): DoubanSearchItem[] {
       const labels = (item.labels || []).map((x) => x.text).join(" ");
       list.push({
         sid,
-        name: rawTitle.replace(/\(.*?\)/g, " ").replace(/\s+/g, " ").trim() || rawTitle,
-        originalName: rawTitle,
-        year: Number(item.year || matchGroup(rawTitle, /\(([12]\d{3})\)/) || 0),
+        ...subjectSearchTitle(rawTitle, Number(item.year) || 0),
         rating: Number(item.rating?.value || 0),
         votes: Number(item.rating?.count || 0),
         img: item.cover_url || "",
