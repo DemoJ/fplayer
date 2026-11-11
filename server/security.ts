@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { config } from "./config.js";
-import { db } from "./db.js";
+import { getSetting, setSetting } from "./settings.js";
 
 const DEFAULT_SECRET = "development-only-change-me";
 // The value hardcoded in docker-compose.yml. It is the project author's own
@@ -34,11 +34,10 @@ function loadKeys() {
   }
   // No explicit APP_SECRET: persist a per-instance random secret so credentials
   // are not decryptable with the public default value. Lazily read/created in DB.
-  const row = db.prepare("SELECT value FROM app_settings WHERE key=?").get("instance_secret") as { value: string } | undefined;
-  let secret = row?.value;
+  let secret = getSetting("instance_secret");
   if (!secret) {
     secret = randomBytes(48).toString("base64url");
-    db.prepare("INSERT OR REPLACE INTO app_settings(key,value) VALUES('instance_secret',?)").run(secret);
+    setSetting("instance_secret", secret);
   }
   encryptionKey = createHash("sha256").update(secret).digest();
   signingKey = createHash("sha256").update("sign:" + secret).digest();

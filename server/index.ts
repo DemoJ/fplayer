@@ -14,7 +14,7 @@ import { absSeq, blockHead, buildPlaylist, contiguousFrom, ensureCacheDir, fileE
 import { startScan, stopScan } from "./scans.js";
 import { getAutoSyncSettings, restartAutoSync, saveAutoSyncSettings, startAutoSync } from "./sync.js";
 import { rebuildCatalog } from "./catalog.js";
-import { metadataStatus, startMetadataRefresh, stopMetadataRefresh, checkDoubanLogin, refreshWorkMetadata } from "./metadata.js";
+import { metadataStatus, startMetadataRefresh, stopMetadataRefresh, checkDoubanLogin, refreshWorkMetadata, resetOutdatedMatches } from "./metadata.js";
 import { getDoubanSettings, saveDoubanSettings } from "./douban.js";
 import { getTranscodeAcceleration, isTranscodeQuality, isTranscodeMode, transcodeArgs, type TranscodeMode, type TranscodeQuality } from "./ffmpeg.js";
 import { log } from "./log.js";
@@ -914,7 +914,10 @@ db.prepare("UPDATE metadata_jobs SET status='failed',phase='interrupted',error='
 // Anything that finished before startup is old news; acknowledge it so users
 // are not greeted by a wall of stale scan notifications on the next visit.
 db.prepare("UPDATE scan_jobs SET acknowledged=1 WHERE acknowledged=0 AND status IN ('completed','failed','cancelled')").run();
+const outdatedMatches = resetOutdatedMatches();
+if (outdatedMatches) console.log(`Metadata matcher changed: ${outdatedMatches} works will be scraped again`);
 rebuildCatalog();
+if (outdatedMatches) startMetadataRefresh();
 void sweepStaleDirectories();
 void sweepCache();
 const cacheSweepTimer = setInterval(() => void sweepCache(), 10 * 60 * 1000);
